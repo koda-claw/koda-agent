@@ -47,7 +47,7 @@ jobs:
           rm -f dist/pkg/resources/assets/tmwd_cdp_bridge/config.js
           rm -f dist/pkg/resources/memory/global_mem.txt dist/pkg/resources/memory/global_mem_insight.txt dist/pkg/resources/memory/file_access_stats.json dist/pkg/resources/memory/long_term_updates.jsonl dist/pkg/resources/memory/pending_long_term_updates.md
           tar -C dist/pkg -czf dist/koda-agent-${{ matrix.target }}.tar.gz koda-agent resources
-          shasum -a 256 dist/koda-agent-${{ matrix.target }}.tar.gz > dist/koda-agent-${{ matrix.target }}.tar.gz.sha256
+          (cd dist && shasum -a 256 koda-agent-${{ matrix.target }}.tar.gz > koda-agent-${{ matrix.target }}.tar.gz.sha256)
       - name: Package Windows
         if: matrix.archive == 'zip'
         shell: pwsh
