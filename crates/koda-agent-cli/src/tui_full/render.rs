@@ -394,10 +394,11 @@ fn inspector_lines(state: &TuiAppState) -> Vec<Line<'static>> {
             )),
         ]),
         Line::raw(format!(
-            "会话 #{}  模型 {}",
+            "会话 #{}  Profile {}",
             state.active,
-            trim_chars(&state.model_label, 20)
+            trim_chars(&state.profile_label, 20)
         )),
+        Line::raw(format!("模型 {}", trim_chars(&state.model_label, 28))),
         Line::raw(format!(
             "API {}  stream:{}  mouse:{}",
             state.api_mode,

@@ -22,6 +22,10 @@ scripts/install.sh --from-source
 The installer also populates `~/.koda-agent/resources` from the checkout or
 release archive. This keeps packaged prompts, tool schemas, memory SOPs, Python
 requirements, and browser bridge assets separate from your project workspace.
+It also runs `koda-agent init`: if the current directory has a complete `.env`,
+that file is copied into `~/.koda-agent/.env`; otherwise a local template is
+created there for you to fill in. The LLM config example is also installed as
+`~/.koda-agent/config/llms.example.toml`.
 
 Install to a custom prefix:
 
@@ -69,6 +73,26 @@ Override locations when needed:
 koda-agent --home /path/to/home --workspace /path/to/project doctor
 KODA_AGENT_HOME=/path/to/home KODA_WORKSPACE=/path/to/project koda-agent doctor
 ```
+
+Initialize or repair the runtime home without reinstalling:
+
+```bash
+koda-agent init
+koda-agent init --from-env /path/to/.env
+koda-agent init --force --from-env /path/to/.env
+koda-agent config setup mimo --yes
+koda-agent config secret MIMO_API_KEY --from-stdin
+koda-agent config validate
+```
+
+Runtime configuration lookup checks the current directory, the explicit
+workspace, `~/.koda-agent/.env`, installed resources, and the platform config
+directory such as `~/.config/koda-agent/.env`. Secrets are never printed by
+`doctor` or `init`.
+
+Use `config/llms.toml` for optional multi-model, failover, Claude Messages API,
+Responses API, timeout, proxy, and reasoning/thinking settings. Keep real
+secrets in `.env` unless you intentionally want TOML-only model profiles.
 
 Repair or inspect resources explicitly:
 

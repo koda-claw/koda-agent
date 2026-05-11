@@ -2412,6 +2412,8 @@ mod tests {
             openai_api_key: "sk-test".into(),
             openai_model: "m".into(),
             llm_api_style: "chat".into(),
+            auth_scheme: None,
+            auth_header: None,
             max_turns: 3,
             verbose: false,
             stream: false,

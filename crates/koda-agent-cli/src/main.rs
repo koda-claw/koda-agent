@@ -9,7 +9,7 @@ use crossterm::{
     terminal::{Clear, ClearType},
 };
 use koda_agent_core::{
-    AgentConfig, AgentEvent, AgentPathOptions, AgentRuntime,
+    AgentConfig, AgentEvent, AgentPathOptions, AgentRuntime, default_koda_config_dir,
     python_runtime::{
         PythonExtra, PythonPurpose, bootstrap_managed_python, doctor_python,
         python_unavailable_message, remove_managed_python, resolve_python,
@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     env, fs,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::{Command as StdCommand, Stdio},
     sync::{Arc, Mutex},
@@ -36,6 +36,7 @@ use std::{
 use tokio::time::{sleep, timeout};
 
 const DEFAULT_RELEASE_REPO: &str = "koda-claw/koda-agent";
+const DEFAULT_LLMS_EXAMPLE: &str = include_str!("../../../config/llms.example.toml");
 
 #[derive(Parser, Debug)]
 #[command(
@@ -66,8 +67,10 @@ struct Args {
         help = "Reflect script/rule: poll Python check() or native JSON rule and feed triggered tasks"
     )]
     reflect_rule: Option<String>,
-    #[arg(long)]
+    #[arg(long, alias = "llm-no")]
     llm_no: Option<usize>,
+    #[arg(long, help = "Override active LLM profile for this process")]
+    profile: Option<String>,
     #[arg(long)]
     verbose: bool,
     #[arg(
@@ -82,6 +85,22 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum CliCommand {
+    Init {
+        #[arg(
+            long = "from-env",
+            help = "Copy an existing .env into Koda home; defaults to the current workspace .env when present"
+        )]
+        from_env: Option<PathBuf>,
+        #[arg(long, help = "Overwrite ~/.koda-agent/.env when it already exists")]
+        force: bool,
+        #[arg(
+            long,
+            help = "Show planned initialization actions without changing files"
+        )]
+        dry_run: bool,
+        #[arg(long, help = "Emit initialization report as JSON")]
+        json: bool,
+    },
     Doctor {
         #[arg(long)]
         json: bool,
@@ -115,6 +134,10 @@ enum CliCommand {
     Resources {
         #[command(subcommand)]
         command: ResourceCommand,
+    },
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
     },
     Update {
         #[arg(
@@ -188,6 +211,144 @@ enum ResourceCommand {
 }
 
 #[derive(Subcommand, Debug)]
+enum ConfigCommand {
+    Path {
+        #[arg(long)]
+        json: bool,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    Show {
+        profile: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    Setup {
+        #[arg(
+            default_value = "mimo",
+            help = "Preset: mimo, deepseek, openai, claude, openrouter"
+        )]
+        preset: String,
+        #[arg(long, help = "Profile name; defaults to the preset name")]
+        name: Option<String>,
+        #[arg(long, help = "Override preset model")]
+        model: Option<String>,
+        #[arg(long = "base-url", help = "Override preset base URL")]
+        base_url: Option<String>,
+        #[arg(
+            long = "api-key-env",
+            help = "Environment variable name used for the API key"
+        )]
+        api_key_env: Option<String>,
+        #[arg(
+            long = "api-key",
+            help = "API key value to save into .env; not recommended because shells may record it"
+        )]
+        api_key: Option<String>,
+        #[arg(
+            long = "from-env",
+            help = "Read API key from the selected api-key-env variable"
+        )]
+        from_env: bool,
+        #[arg(
+            long = "set-active",
+            default_value_t = true,
+            help = "Set KODA_LLM_PROFILE to this profile"
+        )]
+        set_active: bool,
+        #[arg(long, help = "Overwrite an existing profile with the same name")]
+        force: bool,
+        #[arg(long, help = "Assume yes for non-interactive setup")]
+        yes: bool,
+        #[arg(long, help = "Show planned config changes without writing files")]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Validate {
+        #[arg(long)]
+        json: bool,
+    },
+    Use {
+        profile: String,
+        #[arg(long, help = "Show planned env update without writing")]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Secret {
+        #[arg(help = "Environment variable name, for example MIMO_API_KEY")]
+        name: String,
+        #[arg(long, help = "Secret value; use --from-stdin to avoid shell history")]
+        value: Option<String>,
+        #[arg(long, help = "Read secret value from stdin")]
+        from_stdin: bool,
+        #[arg(long, help = "Show planned path without writing")]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Add {
+        profile: String,
+        #[arg(long, default_value = "native_oai")]
+        kind: String,
+        #[arg(long = "base-url")]
+        base_url: String,
+        #[arg(long = "api-key-env")]
+        api_key_env: String,
+        #[arg(long)]
+        model: String,
+        #[arg(long = "api-mode")]
+        api_mode: Option<String>,
+        #[arg(long = "auth-scheme")]
+        auth_scheme: Option<String>,
+        #[arg(long = "auth-header")]
+        auth_header: Option<String>,
+        #[arg(long, help = "Set KODA_LLM_PROFILE to this profile")]
+        use_profile: bool,
+        #[arg(long, help = "Overwrite an existing profile with the same name")]
+        force: bool,
+        #[arg(long, help = "Show planned config changes without writing")]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Set {
+        profile: String,
+        key: String,
+        value: String,
+        #[arg(long, help = "Show planned config changes without writing")]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Remove {
+        profile: String,
+        #[arg(
+            long,
+            help = "Also clear KODA_LLM_PROFILE when it points at this profile"
+        )]
+        clear_active: bool,
+        #[arg(long, help = "Show planned config changes without writing")]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Migrate {
+        #[arg(long, default_value = "openai-compat")]
+        name: String,
+        #[arg(long, help = "Overwrite existing llms.toml/profile")]
+        force: bool,
+        #[arg(long, help = "Show planned migration without writing")]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum MemoryCommand {
     Settle {
         #[arg(
@@ -230,6 +391,22 @@ async fn main() -> Result<()> {
     if let Some(CliCommand::Doctor { json }) = &args.command {
         return run_doctor(&root, path_options, *json);
     }
+    if let Some(CliCommand::Init {
+        from_env,
+        force,
+        dry_run,
+        json,
+    }) = &args.command
+    {
+        return run_init(
+            &root,
+            path_options,
+            from_env.as_deref(),
+            *force,
+            *dry_run,
+            *json,
+        );
+    }
     if let Some(CliCommand::BootstrapPython {
         extras,
         recreate,
@@ -253,6 +430,9 @@ async fn main() -> Result<()> {
     }
     if let Some(CliCommand::Resources { command }) = &args.command {
         return run_resources(&root, path_options, command);
+    }
+    if let Some(CliCommand::Config { command }) = &args.command {
+        return run_config(&root, path_options, command);
     }
     if let Some(CliCommand::Update {
         repo,
@@ -281,6 +461,11 @@ async fn main() -> Result<()> {
         )
         .await;
     }
+    if let Some(profile) = args.profile.as_deref() {
+        unsafe {
+            env::set_var("KODA_LLM_PROFILE", profile);
+        }
+    }
     let mut cfg = AgentConfig::from_env_with_path_options(root, path_options)?;
     if args.verbose {
         cfg.verbose = true;
@@ -296,12 +481,14 @@ async fn main() -> Result<()> {
         Some(CliCommand::Frontend { name }) => {
             return run_frontend(&name, build_runtime(cfg)?).await;
         }
+        Some(CliCommand::Init { .. }) => unreachable!("init handled before config load"),
         Some(CliCommand::Doctor { .. }) => unreachable!("doctor handled before config load"),
         Some(CliCommand::BootstrapPython { .. }) => {
             unreachable!("bootstrap-python handled before config load")
         }
         Some(CliCommand::PythonEnv { .. }) => unreachable!("python-env handled before config load"),
         Some(CliCommand::Resources { .. }) => unreachable!("resources handled before config load"),
+        Some(CliCommand::Config { .. }) => unreachable!("config handled before config load"),
         Some(CliCommand::Update { .. }) => unreachable!("update handled before config load"),
         Some(CliCommand::Memory {
             command: MemoryCommand::Settle { assisted },
@@ -415,6 +602,15 @@ fn run_doctor(root: &Path, path_options: AgentPathOptions, json_output: bool) ->
     let env_path = root.join(".env");
     let home_env_path = paths.home_dir.join(".env");
     let resource_env_path = paths.resource_dir.join(".env");
+    let config_env_path = default_koda_config_dir().map(|dir| dir.join(".env"));
+    let mut env_paths: Vec<&Path> = vec![
+        env_path.as_path(),
+        home_env_path.as_path(),
+        resource_env_path.as_path(),
+    ];
+    if let Some(path) = &config_env_path {
+        env_paths.push(path.as_path());
+    }
     let python = doctor_python(&paths.home_dir, PythonPurpose::AgentHelper);
     let llm = AgentConfig::from_env_with_path_options(root.to_path_buf(), path_options)
         .ok()
@@ -437,12 +633,13 @@ fn run_doctor(root: &Path, path_options: AgentPathOptions, json_output: bool) ->
             "logs_dir": paths.logs_dir.display().to_string(),
             "sessions_dir": paths.sessions_dir.display().to_string(),
             "browser_dir": paths.browser_dir.display().to_string(),
-            "env_file": env_path.exists() || home_env_path.exists() || resource_env_path.exists(),
+            "config_dir": default_koda_config_dir().map(|p| p.display().to_string()),
+            "env_file": env_paths.iter().any(|p| p.exists()),
             "env_keys": {
-                "OPENAI_BASE_URL": env_key_available_any(&[&env_path, &home_env_path, &resource_env_path], "OPENAI_BASE_URL"),
-                "OPENAI_API_KEY": env_key_available_any(&[&env_path, &home_env_path, &resource_env_path], "OPENAI_API_KEY"),
-                "OPENAI_MODEL": env_key_available_any(&[&env_path, &home_env_path, &resource_env_path], "OPENAI_MODEL"),
-                "OPENAI_STREAM": env_key_available_any(&[&env_path, &home_env_path, &resource_env_path], "OPENAI_STREAM"),
+                "OPENAI_BASE_URL": env_key_available_any(&env_paths, "OPENAI_BASE_URL"),
+                "OPENAI_API_KEY": env_key_available_any(&env_paths, "OPENAI_API_KEY"),
+                "OPENAI_MODEL": env_key_available_any(&env_paths, "OPENAI_MODEL"),
+                "OPENAI_STREAM": env_key_available_any(&env_paths, "OPENAI_STREAM"),
             }
         },
         "llm": llm,
@@ -461,7 +658,7 @@ fn run_doctor(root: &Path, path_options: AgentPathOptions, json_output: bool) ->
         println!("  logs: {}", paths.logs_dir.display());
         println!(
             "  .env: {}",
-            if env_path.exists() || home_env_path.exists() || resource_env_path.exists() {
+            if env_paths.iter().any(|p| p.exists()) {
                 "found"
             } else {
                 "missing"
@@ -526,6 +723,160 @@ fn run_doctor(root: &Path, path_options: AgentPathOptions, json_output: bool) ->
         println!("\nResources");
         println!("  source: {}", if source_ok { "ok" } else { "missing" });
         println!("  home: {}", if home_ok { "ok" } else { "missing" });
+    }
+    Ok(())
+}
+
+fn run_init(
+    root: &Path,
+    path_options: AgentPathOptions,
+    from_env: Option<&Path>,
+    force: bool,
+    dry_run: bool,
+    json_output: bool,
+) -> Result<()> {
+    let paths = resolve_agent_paths_with_options(root, path_options);
+    let config_dir = default_koda_config_dir();
+    let dest_env = paths.home_dir.join(".env");
+    let source_env = from_env
+        .map(Path::to_path_buf)
+        .or_else(|| discover_init_env_source(root, &paths, &dest_env));
+    let mut created_dirs = Vec::new();
+    let dirs = vec![
+        paths.home_dir.clone(),
+        paths.home_dir.join("config"),
+        paths.temp_dir.clone(),
+        paths.memory_dir.clone(),
+        paths.logs_dir.clone(),
+        paths.sessions_dir.clone(),
+        paths.browser_dir.clone(),
+    ];
+    for dir in &dirs {
+        created_dirs.push(dir.display().to_string());
+        if !dry_run {
+            fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        }
+    }
+    if let Some(dir) = &config_dir {
+        created_dirs.push(dir.display().to_string());
+        if !dry_run {
+            fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        }
+    }
+
+    let mut env_action = "skipped_existing";
+    if !dest_env.exists() || force {
+        if let Some(source) = &source_env {
+            if !source.is_file() {
+                bail!("source .env does not exist: {}", source.display());
+            }
+            env_action = if dest_env.exists() {
+                "overwritten_from_source"
+            } else {
+                "copied_from_source"
+            };
+            if !dry_run {
+                if let Some(parent) = dest_env.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(source, &dest_env).with_context(|| {
+                    format!("copy {} to {}", source.display(), dest_env.display())
+                })?;
+                secure_env_file_permissions(&dest_env)?;
+            }
+        } else {
+            env_action = if dest_env.exists() {
+                "overwritten_template"
+            } else {
+                "created_template"
+            };
+            if !dry_run {
+                if let Some(parent) = dest_env.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&dest_env, default_env_template()).with_context(|| {
+                    format!("write default config template {}", dest_env.display())
+                })?;
+                secure_env_file_permissions(&dest_env)?;
+            }
+        }
+    }
+
+    let llms_example_path = paths.home_dir.join("config/llms.example.toml");
+    let llms_example_source = discover_llms_example_source(root, &paths);
+    let mut llms_example_action = "skipped_existing";
+    if !llms_example_path.exists() || force {
+        llms_example_action = if llms_example_source.is_some() {
+            if llms_example_path.exists() {
+                "overwritten_from_source"
+            } else {
+                "copied_from_source"
+            }
+        } else if llms_example_path.exists() {
+            "overwritten_embedded"
+        } else {
+            "created_embedded"
+        };
+        if !dry_run {
+            if let Some(parent) = llms_example_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if let Some(source) = &llms_example_source {
+                fs::copy(source, &llms_example_path).with_context(|| {
+                    format!(
+                        "copy {} to {}",
+                        source.display(),
+                        llms_example_path.display()
+                    )
+                })?;
+            } else {
+                fs::write(&llms_example_path, DEFAULT_LLMS_EXAMPLE)
+                    .with_context(|| format!("write {}", llms_example_path.display()))?;
+            }
+        }
+    }
+
+    let env_paths: [&Path; 1] = [dest_env.as_path()];
+    let report = serde_json::json!({
+        "home": paths.home_dir.display().to_string(),
+        "workspace": paths.workspace_dir.display().to_string(),
+        "resources": paths.resource_dir.display().to_string(),
+        "config_dir": config_dir.map(|p| p.display().to_string()),
+        "created_dirs": created_dirs,
+        "env": {
+            "path": dest_env.display().to_string(),
+            "action": env_action,
+            "source": source_env.map(|p| p.display().to_string()),
+            "exists": dry_run || dest_env.exists(),
+            "keys": {
+                "OPENAI_BASE_URL": env_key_available_any(&env_paths, "OPENAI_BASE_URL"),
+                "OPENAI_API_KEY": env_key_available_any(&env_paths, "OPENAI_API_KEY"),
+                "OPENAI_MODEL": env_key_available_any(&env_paths, "OPENAI_MODEL"),
+            }
+        },
+        "llms_example": {
+            "path": llms_example_path.display().to_string(),
+            "action": llms_example_action,
+            "source": llms_example_source.map(|p| p.display().to_string()),
+            "exists": dry_run || llms_example_path.exists(),
+        },
+        "dry_run": dry_run,
+    });
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("Koda Agent initialized");
+        println!("  home: {}", paths.home_dir.display());
+        println!("  workspace: {}", paths.workspace_dir.display());
+        println!("  .env: {} ({env_action})", dest_env.display());
+        if let Some(source) = report["env"]["source"].as_str() {
+            println!("  source: {source}");
+        }
+        println!(
+            "  llms example: {} ({llms_example_action})",
+            llms_example_path.display()
+        );
+        println!("  next: koda-agent doctor");
     }
     Ok(())
 }
@@ -598,6 +949,1255 @@ fn run_resources(
         }
     }
     Ok(())
+}
+
+fn run_config(root: &Path, path_options: AgentPathOptions, command: &ConfigCommand) -> Result<()> {
+    let paths = resolve_agent_paths_with_options(root, path_options);
+    match command {
+        ConfigCommand::Path { json } => run_config_path(&paths, *json),
+        ConfigCommand::List { json } => run_config_list(root, &paths, *json),
+        ConfigCommand::Show { profile, json } => {
+            run_config_show(root, &paths, profile.as_deref(), *json)
+        }
+        ConfigCommand::Setup {
+            preset,
+            name,
+            model,
+            base_url,
+            api_key_env,
+            api_key,
+            from_env,
+            set_active,
+            force,
+            yes,
+            dry_run,
+            json,
+        } => run_config_setup(
+            root,
+            &paths,
+            ConfigSetupRequest {
+                preset,
+                name: name.as_deref(),
+                model: model.as_deref(),
+                base_url: base_url.as_deref(),
+                api_key_env: api_key_env.as_deref(),
+                api_key: api_key.as_deref(),
+                from_env: *from_env,
+                set_active: *set_active,
+                force: *force,
+                yes: *yes,
+                dry_run: *dry_run,
+                json: *json,
+            },
+        ),
+        ConfigCommand::Validate { json } => run_config_validate(root, &paths, *json),
+        ConfigCommand::Use {
+            profile,
+            dry_run,
+            json,
+        } => run_config_use(root, &paths, profile, *dry_run, *json),
+        ConfigCommand::Secret {
+            name,
+            value,
+            from_stdin,
+            dry_run,
+            json,
+        } => run_config_secret(&paths, name, value.as_deref(), *from_stdin, *dry_run, *json),
+        ConfigCommand::Add {
+            profile,
+            kind,
+            base_url,
+            api_key_env,
+            model,
+            api_mode,
+            auth_scheme,
+            auth_header,
+            use_profile,
+            force,
+            dry_run,
+            json,
+        } => run_config_add(
+            &paths,
+            ConfigAddRequest {
+                profile,
+                kind,
+                base_url,
+                api_key_env,
+                model,
+                api_mode: api_mode.as_deref(),
+                auth_scheme: auth_scheme.as_deref(),
+                auth_header: auth_header.as_deref(),
+                use_profile: *use_profile,
+                force: *force,
+                dry_run: *dry_run,
+                json: *json,
+            },
+        ),
+        ConfigCommand::Set {
+            profile,
+            key,
+            value,
+            dry_run,
+            json,
+        } => run_config_set(&paths, profile, key, value, *dry_run, *json),
+        ConfigCommand::Remove {
+            profile,
+            clear_active,
+            dry_run,
+            json,
+        } => run_config_remove(root, &paths, profile, *clear_active, *dry_run, *json),
+        ConfigCommand::Migrate {
+            name,
+            force,
+            dry_run,
+            json,
+        } => run_config_migrate(root, &paths, name, *force, *dry_run, *json),
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct ConfigLlmsToml {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selector: Option<ConfigSelectorToml>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    defaults: Option<ConfigDefaultsToml>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    profiles: Vec<ConfigProfileToml>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mixin: Option<ConfigMixinToml>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct ConfigSelectorToml {
+    default: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct ConfigDefaultsToml {
+    stream: Option<bool>,
+    timeout_secs: Option<u64>,
+    connect_timeout_secs: Option<u64>,
+    verify_tls: Option<bool>,
+    temperature: Option<f64>,
+    max_tokens: Option<u64>,
+    failover: Option<bool>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct ConfigProfileToml {
+    name: String,
+    kind: String,
+    base_url: String,
+    api_key_env: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_scheme: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_header: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_key_header: Option<String>,
+    model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connect_timeout_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verify_tls: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_budget_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proxy: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    headers: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fake_cc_system_prompt: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_agent: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct ConfigMixinToml {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    llm_nos: Vec<String>,
+    max_retries: Option<usize>,
+    base_delay: Option<f64>,
+    spring_back: Option<u64>,
+}
+
+struct ConfigSetupRequest<'a> {
+    preset: &'a str,
+    name: Option<&'a str>,
+    model: Option<&'a str>,
+    base_url: Option<&'a str>,
+    api_key_env: Option<&'a str>,
+    api_key: Option<&'a str>,
+    from_env: bool,
+    set_active: bool,
+    force: bool,
+    yes: bool,
+    dry_run: bool,
+    json: bool,
+}
+
+struct ConfigAddRequest<'a> {
+    profile: &'a str,
+    kind: &'a str,
+    base_url: &'a str,
+    api_key_env: &'a str,
+    model: &'a str,
+    api_mode: Option<&'a str>,
+    auth_scheme: Option<&'a str>,
+    auth_header: Option<&'a str>,
+    use_profile: bool,
+    force: bool,
+    dry_run: bool,
+    json: bool,
+}
+
+fn config_env_path(paths: &koda_agent_core::AgentPaths) -> PathBuf {
+    paths.home_dir.join(".env")
+}
+
+fn config_llms_path(paths: &koda_agent_core::AgentPaths) -> PathBuf {
+    paths.home_dir.join("config/llms.toml")
+}
+
+fn config_example_path(paths: &koda_agent_core::AgentPaths) -> PathBuf {
+    paths.home_dir.join("config/llms.example.toml")
+}
+
+fn run_config_path(paths: &koda_agent_core::AgentPaths, json_output: bool) -> Result<()> {
+    let report = serde_json::json!({
+        "home": paths.home_dir.display().to_string(),
+        "env": config_env_path(paths).display().to_string(),
+        "llms": config_llms_path(paths).display().to_string(),
+        "example": config_example_path(paths).display().to_string(),
+    });
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("home: {}", paths.home_dir.display());
+        println!("env: {}", config_env_path(paths).display());
+        println!("llms: {}", config_llms_path(paths).display());
+        println!("example: {}", config_example_path(paths).display());
+    }
+    Ok(())
+}
+
+fn config_env_paths(root: &Path, paths: &koda_agent_core::AgentPaths) -> Vec<PathBuf> {
+    vec![
+        root.join(".env"),
+        paths.workspace_dir.join(".env"),
+        config_env_path(paths),
+    ]
+}
+
+fn config_active_profile(
+    root: &Path,
+    paths: &koda_agent_core::AgentPaths,
+    cfg: &ConfigLlmsToml,
+) -> Option<String> {
+    env_value_available_any(&config_env_paths(root, paths), "KODA_LLM_PROFILE")
+        .or_else(|| cfg.selector.as_ref().and_then(|s| s.default.clone()))
+        .or_else(|| cfg.profiles.first().map(|p| p.name.clone()))
+}
+
+fn config_profile_report(
+    profile: &ConfigProfileToml,
+    active: Option<&str>,
+    env_paths: &[PathBuf],
+) -> serde_json::Value {
+    let key_found = env_value_available_any(env_paths, &profile.api_key_env)
+        .is_some_and(|v| !v.trim().is_empty());
+    serde_json::json!({
+        "name": profile.name,
+        "active": active == Some(profile.name.as_str()),
+        "kind": profile.kind,
+        "base_url": profile.base_url,
+        "api_key_env": profile.api_key_env,
+        "key_found": key_found,
+        "auth_scheme": profile.auth_scheme,
+        "auth_header": profile.auth_header,
+        "model": profile.model,
+        "api_mode": profile.api_mode,
+        "stream": profile.stream,
+        "timeout_secs": profile.timeout_secs,
+        "connect_timeout_secs": profile.connect_timeout_secs,
+        "verify_tls": profile.verify_tls,
+        "temperature": profile.temperature,
+        "max_tokens": profile.max_tokens,
+        "reasoning_effort": profile.reasoning_effort,
+        "thinking_type": profile.thinking_type,
+        "thinking_budget_tokens": profile.thinking_budget_tokens,
+        "proxy": profile.proxy,
+        "headers": profile.headers,
+    })
+}
+
+fn run_config_list(
+    root: &Path,
+    paths: &koda_agent_core::AgentPaths,
+    json_output: bool,
+) -> Result<()> {
+    let llms_path = config_llms_path(paths);
+    let cfg = read_config_llms(&llms_path)?.unwrap_or_default();
+    let env_paths = config_env_paths(root, paths);
+    let active = config_active_profile(root, paths, &cfg);
+    let profiles = cfg
+        .profiles
+        .iter()
+        .map(|p| config_profile_report(p, active.as_deref(), &env_paths))
+        .collect::<Vec<_>>();
+    let report = serde_json::json!({
+        "llms": llms_path.display().to_string(),
+        "active": active,
+        "profiles": profiles,
+    });
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("LLM profiles: {}", llms_path.display());
+        for profile in report["profiles"].as_array().into_iter().flatten() {
+            let mark = if profile["active"].as_bool().unwrap_or(false) {
+                "*"
+            } else {
+                " "
+            };
+            let key = if profile["key_found"].as_bool().unwrap_or(false) {
+                "key:ok"
+            } else {
+                "key:missing"
+            };
+            println!(
+                "{mark} {}  {}  {}  {}",
+                profile["name"].as_str().unwrap_or(""),
+                profile["kind"].as_str().unwrap_or(""),
+                profile["model"].as_str().unwrap_or(""),
+                key
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_config_show(
+    root: &Path,
+    paths: &koda_agent_core::AgentPaths,
+    profile: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
+    let llms_path = config_llms_path(paths);
+    let cfg = read_config_llms(&llms_path)?.with_context(|| {
+        format!(
+            "missing {}; run `koda-agent config setup mimo`",
+            llms_path.display()
+        )
+    })?;
+    let env_paths = config_env_paths(root, paths);
+    let active = config_active_profile(root, paths, &cfg);
+    let selected = profile
+        .map(ToOwned::to_owned)
+        .or_else(|| active.clone())
+        .context("no profile selected; pass a profile name")?;
+    let profile = cfg
+        .profiles
+        .iter()
+        .find(|p| p.name == selected)
+        .with_context(|| format!("profile `{selected}` does not exist"))?;
+    let report = config_profile_report(profile, active.as_deref(), &env_paths);
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("profile: {}", report["name"].as_str().unwrap_or(""));
+        println!("active: {}", report["active"].as_bool().unwrap_or(false));
+        println!("kind: {}", report["kind"].as_str().unwrap_or(""));
+        println!("model: {}", report["model"].as_str().unwrap_or(""));
+        println!("base_url: {}", report["base_url"].as_str().unwrap_or(""));
+        println!(
+            "api_key_env: {}",
+            report["api_key_env"].as_str().unwrap_or("")
+        );
+        println!(
+            "key: {}",
+            if report["key_found"].as_bool().unwrap_or(false) {
+                "found"
+            } else {
+                "missing"
+            }
+        );
+    }
+    Ok(())
+}
+
+fn run_config_setup(
+    root: &Path,
+    paths: &koda_agent_core::AgentPaths,
+    req: ConfigSetupRequest<'_>,
+) -> Result<()> {
+    let mut profile = config_preset_profile(req.preset)?;
+    if let Some(name) = req.name {
+        profile.name = name.to_string();
+    }
+    if let Some(model) = req.model {
+        profile.model = model.to_string();
+    }
+    if let Some(base_url) = req.base_url {
+        profile.base_url = base_url.to_string();
+    }
+    if let Some(api_key_env) = req.api_key_env {
+        profile.api_key_env = api_key_env.to_string();
+    }
+    if !req.yes && req.api_key.is_none() && !req.from_env && !req.dry_run {
+        println!(
+            "No API key provided. Creating profile with empty {}; run `koda-agent config secret {}` later.",
+            profile.api_key_env, profile.api_key_env
+        );
+    }
+    let key_value = if req.from_env {
+        env_value_available_any(&config_env_paths(root, paths), &profile.api_key_env)
+            .with_context(|| format!("{} missing in environment or .env", profile.api_key_env))?
+    } else {
+        req.api_key.unwrap_or_default().to_string()
+    };
+
+    let llms_path = config_llms_path(paths);
+    let env_path = config_env_path(paths);
+    let example_path = config_example_path(paths);
+    let mut cfg = read_config_llms(&llms_path)?.unwrap_or_else(default_config_llms);
+    let existing = cfg.profiles.iter().position(|p| p.name == profile.name);
+    let profile_action = if let Some(idx) = existing {
+        if !req.force {
+            bail!(
+                "profile `{}` already exists; pass --force to overwrite",
+                profile.name
+            );
+        }
+        cfg.profiles[idx] = profile.clone();
+        "overwritten"
+    } else {
+        cfg.profiles.push(profile.clone());
+        "created"
+    };
+    if req.set_active {
+        cfg.selector
+            .get_or_insert_with(ConfigSelectorToml::default)
+            .default = Some(profile.name.clone());
+    }
+
+    let mut env_updates = BTreeMap::new();
+    if req.set_active {
+        env_updates.insert("KODA_LLM_PROFILE".to_string(), profile.name.clone());
+    }
+    env_updates.insert(profile.api_key_env.clone(), key_value);
+
+    if !req.dry_run {
+        fs::create_dir_all(paths.home_dir.join("config"))?;
+        if !example_path.exists() {
+            write_file_atomic(&example_path, DEFAULT_LLMS_EXAMPLE.as_bytes())?;
+        }
+        if llms_path.exists() {
+            backup_file(&llms_path)?;
+        }
+        let text = toml::to_string_pretty(&cfg)?;
+        write_file_atomic(&llms_path, text.as_bytes())?;
+        upsert_env_file(&env_path, &env_updates)?;
+        secure_env_file_permissions(&env_path)?;
+    }
+
+    let report = serde_json::json!({
+        "profile": profile.name,
+        "preset": req.preset,
+        "profile_action": profile_action,
+        "llms": llms_path.display().to_string(),
+        "env": env_path.display().to_string(),
+        "example": example_path.display().to_string(),
+        "active": req.set_active,
+        "api_key_env": profile.api_key_env,
+        "api_key_saved": !env_updates.get(&profile.api_key_env).unwrap_or(&String::new()).is_empty(),
+        "dry_run": req.dry_run,
+    });
+    if req.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "Configured profile: {}",
+            report["profile"].as_str().unwrap_or("")
+        );
+        println!("Preset: {}", req.preset);
+        println!("LLM config: {}", llms_path.display());
+        println!("Env file: {}", env_path.display());
+        println!(
+            "Key: {} {}",
+            report["api_key_env"].as_str().unwrap_or(""),
+            if report["api_key_saved"].as_bool().unwrap_or(false) {
+                "saved"
+            } else {
+                "empty"
+            }
+        );
+        println!("Next: koda-agent config validate");
+    }
+    Ok(())
+}
+
+fn write_config_llms(path: &Path, cfg: &ConfigLlmsToml, dry_run: bool) -> Result<()> {
+    if dry_run {
+        return Ok(());
+    }
+    if path.exists() {
+        backup_file(path)?;
+    }
+    let text = toml::to_string_pretty(cfg)?;
+    write_file_atomic(path, text.as_bytes())
+}
+
+fn run_config_use(
+    root: &Path,
+    paths: &koda_agent_core::AgentPaths,
+    profile: &str,
+    dry_run: bool,
+    json_output: bool,
+) -> Result<()> {
+    let llms_path = config_llms_path(paths);
+    let cfg = read_config_llms(&llms_path)?.with_context(|| {
+        format!(
+            "missing {}; run `koda-agent config setup mimo`",
+            llms_path.display()
+        )
+    })?;
+    if !cfg.profiles.iter().any(|p| p.name == profile) {
+        bail!("profile `{profile}` does not exist");
+    }
+    let before = config_active_profile(root, paths, &cfg);
+    let env_path = config_env_path(paths);
+    if !dry_run {
+        let mut updates = BTreeMap::new();
+        updates.insert("KODA_LLM_PROFILE".to_string(), profile.to_string());
+        upsert_env_file(&env_path, &updates)?;
+        secure_env_file_permissions(&env_path)?;
+    }
+    let report = serde_json::json!({
+        "env": env_path.display().to_string(),
+        "before": before,
+        "active": profile,
+        "written": !dry_run,
+    });
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if dry_run {
+        println!("Would use profile `{profile}` via {}", env_path.display());
+    } else {
+        println!("Active profile: {profile}");
+    }
+    Ok(())
+}
+
+fn run_config_secret(
+    paths: &koda_agent_core::AgentPaths,
+    name: &str,
+    value: Option<&str>,
+    from_stdin: bool,
+    dry_run: bool,
+    json_output: bool,
+) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    {
+        bail!("secret name must use uppercase env syntax, for example MIMO_API_KEY");
+    }
+    let secret = if from_stdin {
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("read secret from stdin")?;
+        input.trim_end_matches(['\r', '\n']).to_string()
+    } else if let Some(value) = value {
+        value.to_string()
+    } else if io::stdin().is_terminal() {
+        rpassword::prompt_password(format!("{name}: ")).context("read secret from terminal")?
+    } else {
+        bail!("non-interactive secret input requires --value or --from-stdin");
+    };
+    if secret.trim().is_empty() {
+        bail!("{name} cannot be empty");
+    }
+    let env_path = config_env_path(paths);
+    if !dry_run {
+        let mut updates = BTreeMap::new();
+        updates.insert(name.to_string(), secret);
+        upsert_env_file(&env_path, &updates)?;
+        secure_env_file_permissions(&env_path)?;
+    }
+    let report = serde_json::json!({
+        "env_path": env_path.display().to_string(),
+        "name": name,
+        "written": !dry_run,
+        "redacted": true,
+    });
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if dry_run {
+        println!("Would write {name} to {}", env_path.display());
+    } else {
+        println!("Saved {name} to {}", env_path.display());
+    }
+    Ok(())
+}
+
+fn run_config_add(paths: &koda_agent_core::AgentPaths, req: ConfigAddRequest<'_>) -> Result<()> {
+    if !valid_profile_kind(req.kind) {
+        bail!("invalid kind `{}`", req.kind);
+    }
+    if let Some(api_mode) = req.api_mode
+        && !matches!(api_mode, "chat_completions" | "responses")
+    {
+        bail!("invalid api_mode `{api_mode}`");
+    }
+    if let Some(auth_scheme) = req.auth_scheme
+        && !matches!(
+            auth_scheme,
+            "bearer" | "header" | "x-api-key" | "none" | "no-auth"
+        )
+    {
+        bail!("invalid auth_scheme `{auth_scheme}`");
+    }
+    let llms_path = config_llms_path(paths);
+    let mut cfg = read_config_llms(&llms_path)?.unwrap_or_else(default_config_llms);
+    let profile = ConfigProfileToml {
+        name: req.profile.to_string(),
+        kind: req.kind.to_string(),
+        base_url: req.base_url.to_string(),
+        api_key_env: req.api_key_env.to_string(),
+        auth_scheme: req.auth_scheme.map(ToOwned::to_owned),
+        auth_header: req.auth_header.map(ToOwned::to_owned),
+        model: req.model.to_string(),
+        api_mode: req.api_mode.map(ToOwned::to_owned),
+        stream: Some(true),
+        timeout_secs: Some(600),
+        connect_timeout_secs: Some(30),
+        verify_tls: Some(true),
+        ..Default::default()
+    };
+    let existing = cfg.profiles.iter().position(|p| p.name == profile.name);
+    let action = if let Some(idx) = existing {
+        if !req.force {
+            bail!(
+                "profile `{}` already exists; pass --force to overwrite",
+                profile.name
+            );
+        }
+        cfg.profiles[idx] = profile.clone();
+        "overwritten"
+    } else {
+        cfg.profiles.push(profile.clone());
+        "created"
+    };
+    if req.use_profile {
+        cfg.selector
+            .get_or_insert_with(ConfigSelectorToml::default)
+            .default = Some(profile.name.clone());
+    }
+    write_config_llms(&llms_path, &cfg, req.dry_run)?;
+    if req.use_profile && !req.dry_run {
+        let mut updates = BTreeMap::new();
+        updates.insert("KODA_LLM_PROFILE".to_string(), profile.name.clone());
+        upsert_env_file(&config_env_path(paths), &updates)?;
+    }
+    let report = serde_json::json!({
+        "profile": profile.name,
+        "action": action,
+        "llms": llms_path.display().to_string(),
+        "active": req.use_profile,
+        "written": !req.dry_run,
+    });
+    if req.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "Profile {}: {}",
+            report["profile"].as_str().unwrap_or(""),
+            action
+        );
+    }
+    Ok(())
+}
+
+fn run_config_set(
+    paths: &koda_agent_core::AgentPaths,
+    profile_name: &str,
+    key: &str,
+    value: &str,
+    dry_run: bool,
+    json_output: bool,
+) -> Result<()> {
+    let llms_path = config_llms_path(paths);
+    let mut cfg = read_config_llms(&llms_path)?.with_context(|| {
+        format!(
+            "missing {}; run `koda-agent config setup mimo`",
+            llms_path.display()
+        )
+    })?;
+    let profile = cfg
+        .profiles
+        .iter_mut()
+        .find(|p| p.name == profile_name)
+        .with_context(|| format!("profile `{profile_name}` does not exist"))?;
+    set_profile_field(profile, key, value)?;
+    write_config_llms(&llms_path, &cfg, dry_run)?;
+    let report = serde_json::json!({
+        "profile": profile_name,
+        "key": key,
+        "llms": llms_path.display().to_string(),
+        "written": !dry_run,
+    });
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("Set {profile_name}.{key}");
+    }
+    Ok(())
+}
+
+fn run_config_remove(
+    root: &Path,
+    paths: &koda_agent_core::AgentPaths,
+    profile: &str,
+    clear_active: bool,
+    dry_run: bool,
+    json_output: bool,
+) -> Result<()> {
+    let llms_path = config_llms_path(paths);
+    let mut cfg = read_config_llms(&llms_path)?.with_context(|| {
+        format!(
+            "missing {}; run `koda-agent config setup mimo`",
+            llms_path.display()
+        )
+    })?;
+    let idx = cfg
+        .profiles
+        .iter()
+        .position(|p| p.name == profile)
+        .with_context(|| format!("profile `{profile}` does not exist"))?;
+    let active_before = config_active_profile(root, paths, &cfg);
+    let removed = cfg.profiles.remove(idx);
+    if cfg
+        .selector
+        .as_ref()
+        .and_then(|s| s.default.as_deref())
+        .is_some_and(|active| active == profile)
+    {
+        cfg.selector
+            .get_or_insert_with(ConfigSelectorToml::default)
+            .default = cfg.profiles.first().map(|p| p.name.clone());
+    }
+    write_config_llms(&llms_path, &cfg, dry_run)?;
+    if clear_active && active_before.as_deref() == Some(profile) && !dry_run {
+        let mut updates = BTreeMap::new();
+        updates.insert(
+            "KODA_LLM_PROFILE".to_string(),
+            cfg.profiles
+                .first()
+                .map(|p| p.name.clone())
+                .unwrap_or_default(),
+        );
+        upsert_env_file(&config_env_path(paths), &updates)?;
+    }
+    let report = serde_json::json!({
+        "removed": removed.name,
+        "secret_preserved": removed.api_key_env,
+        "llms": llms_path.display().to_string(),
+        "written": !dry_run,
+    });
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "Removed profile `{}`; secret {} was not deleted",
+            removed.name, removed.api_key_env
+        );
+    }
+    Ok(())
+}
+
+fn run_config_migrate(
+    root: &Path,
+    paths: &koda_agent_core::AgentPaths,
+    name: &str,
+    force: bool,
+    dry_run: bool,
+    json_output: bool,
+) -> Result<()> {
+    let env_paths = config_env_paths(root, paths);
+    let base_url = env_value_available_any(&env_paths, "OPENAI_BASE_URL")
+        .filter(|v| !v.trim().is_empty())
+        .context("OPENAI_BASE_URL missing; run `koda-agent config setup mimo` instead")?;
+    let model = env_value_available_any(&env_paths, "OPENAI_MODEL")
+        .filter(|v| !v.trim().is_empty())
+        .context("OPENAI_MODEL missing; run `koda-agent config setup mimo` instead")?;
+    let key_found =
+        env_value_available_any(&env_paths, "OPENAI_API_KEY").is_some_and(|v| !v.trim().is_empty());
+    if !key_found {
+        bail!("OPENAI_API_KEY missing; add it to .env before migrate");
+    }
+    let api_style = env_value_available_any(&env_paths, "OPENAI_API_STYLE")
+        .unwrap_or_else(|| "chat".into())
+        .to_ascii_lowercase();
+    let (kind, api_mode) = match api_style.as_str() {
+        "responses" => ("native_oai", Some("responses".to_string())),
+        "claude" => ("native_claude", None),
+        _ => ("native_oai", Some("chat_completions".to_string())),
+    };
+    let llms_path = config_llms_path(paths);
+    let existing = read_config_llms(&llms_path)?;
+    if existing
+        .as_ref()
+        .is_some_and(|cfg| !cfg.profiles.is_empty())
+        && !force
+    {
+        bail!(
+            "{} already has profiles; pass --force to merge/overwrite",
+            llms_path.display()
+        );
+    }
+    let mut cfg = existing.unwrap_or_else(default_config_llms);
+    let profile = ConfigProfileToml {
+        name: name.to_string(),
+        kind: kind.to_string(),
+        base_url,
+        api_key_env: "OPENAI_API_KEY".into(),
+        auth_scheme: Some(if kind == "native_claude" {
+            "x-api-key".into()
+        } else {
+            "bearer".into()
+        }),
+        model,
+        api_mode,
+        stream: Some(true),
+        timeout_secs: Some(600),
+        connect_timeout_secs: Some(30),
+        verify_tls: Some(true),
+        ..Default::default()
+    };
+    if let Some(idx) = cfg.profiles.iter().position(|p| p.name == profile.name) {
+        if !force {
+            bail!(
+                "profile `{}` already exists; pass --force to overwrite",
+                profile.name
+            );
+        }
+        cfg.profiles[idx] = profile.clone();
+    } else {
+        cfg.profiles.push(profile.clone());
+    }
+    cfg.selector
+        .get_or_insert_with(ConfigSelectorToml::default)
+        .default = Some(profile.name.clone());
+    write_config_llms(&llms_path, &cfg, dry_run)?;
+    if !dry_run {
+        let mut updates = BTreeMap::new();
+        updates.insert("KODA_LLM_PROFILE".to_string(), profile.name.clone());
+        upsert_env_file(&config_env_path(paths), &updates)?;
+        secure_env_file_permissions(&config_env_path(paths))?;
+    }
+    let report = serde_json::json!({
+        "profile": profile.name,
+        "llms": llms_path.display().to_string(),
+        "api_key_env": "OPENAI_API_KEY",
+        "key_copied_to_toml": false,
+        "written": !dry_run,
+    });
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "Migrated legacy OPENAI_* config to profile `{}`",
+            report["profile"].as_str().unwrap_or("")
+        );
+        println!("Secret remains in OPENAI_API_KEY; it was not copied to TOML");
+    }
+    Ok(())
+}
+
+fn run_config_validate(
+    root: &Path,
+    paths: &koda_agent_core::AgentPaths,
+    json_output: bool,
+) -> Result<()> {
+    let llms_path = config_llms_path(paths);
+    let cfg = read_config_llms(&llms_path)?;
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let mut profiles = Vec::new();
+    let env_paths = vec![
+        root.join(".env"),
+        paths.workspace_dir.join(".env"),
+        config_env_path(paths),
+    ];
+    if cfg.is_none() {
+        let has_legacy_env = ["OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL"]
+            .iter()
+            .any(|key| {
+                env_value_available_any(&env_paths, key).is_some_and(|v| !v.trim().is_empty())
+            });
+        errors.push(if has_legacy_env {
+            format!(
+                "missing {}; legacy OPENAI_* detected; run `koda-agent config migrate`",
+                llms_path.display()
+            )
+        } else {
+            format!(
+                "missing {}; run `koda-agent config setup mimo`",
+                llms_path.display()
+            )
+        });
+    }
+    let cfg = cfg.unwrap_or_default();
+    let active = env_value_available_any(&env_paths, "KODA_LLM_PROFILE")
+        .or_else(|| cfg.selector.as_ref().and_then(|s| s.default.clone()))
+        .or_else(|| cfg.profiles.first().map(|p| p.name.clone()));
+    for profile in &cfg.profiles {
+        let key_found = env_value_available_any(&env_paths, &profile.api_key_env)
+            .is_some_and(|v| !v.trim().is_empty());
+        let mut profile_errors = Vec::new();
+        if !valid_profile_kind(&profile.kind) {
+            profile_errors.push(format!("invalid kind `{}`", profile.kind));
+        }
+        if profile.base_url.trim().is_empty() {
+            profile_errors.push("base_url missing".to_string());
+        }
+        if profile.model.trim().is_empty() {
+            profile_errors.push("model missing".to_string());
+        }
+        if profile.api_key_env.trim().is_empty() {
+            profile_errors.push("api_key_env missing".to_string());
+        }
+        if !key_found {
+            profile_errors.push(format!(
+                "{} missing; run `koda-agent config secret {}`",
+                profile.api_key_env, profile.api_key_env
+            ));
+        }
+        if let Some(api_mode) = &profile.api_mode
+            && !matches!(api_mode.as_str(), "chat_completions" | "responses")
+        {
+            profile_errors.push(format!("invalid api_mode `{api_mode}`"));
+        }
+        if let Some(auth_scheme) = &profile.auth_scheme
+            && !matches!(auth_scheme.as_str(), "bearer" | "header" | "x-api-key")
+        {
+            profile_errors.push(format!("invalid auth_scheme `{auth_scheme}`"));
+        }
+        errors.extend(
+            profile_errors
+                .iter()
+                .map(|e| format!("profile {}: {e}", profile.name)),
+        );
+        profiles.push(serde_json::json!({
+            "name": profile.name,
+            "active": active.as_deref() == Some(profile.name.as_str()),
+            "kind": profile.kind,
+            "model": profile.model,
+            "api_key_env": profile.api_key_env,
+            "key_found": key_found,
+            "errors": profile_errors,
+        }));
+    }
+    if let Some(active) = &active
+        && !cfg.profiles.iter().any(|p| &p.name == active)
+    {
+        errors.push(format!("active profile `{active}` does not exist"));
+    }
+    if cfg.profiles.is_empty() {
+        warnings.push("no profiles configured".to_string());
+    }
+    let report = serde_json::json!({
+        "ok": errors.is_empty(),
+        "llms": llms_path.display().to_string(),
+        "active": active,
+        "profiles": profiles,
+        "warnings": warnings,
+        "errors": errors,
+    });
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if report["ok"].as_bool().unwrap_or(false) {
+        println!("Config ok");
+        println!("  llms: {}", llms_path.display());
+        if let Some(active) = report["active"].as_str() {
+            println!("  active: {active}");
+        }
+    } else {
+        println!("Config invalid");
+        for error in report["errors"].as_array().into_iter().flatten() {
+            println!("  - {}", error.as_str().unwrap_or(""));
+        }
+    }
+    if report["ok"].as_bool().unwrap_or(false) {
+        Ok(())
+    } else {
+        bail!("config validation failed")
+    }
+}
+
+fn default_config_llms() -> ConfigLlmsToml {
+    ConfigLlmsToml {
+        selector: Some(ConfigSelectorToml {
+            default: Some("mimo".to_string()),
+        }),
+        defaults: Some(ConfigDefaultsToml {
+            stream: Some(true),
+            timeout_secs: Some(600),
+            connect_timeout_secs: Some(30),
+            verify_tls: Some(true),
+            temperature: Some(1.0),
+            max_tokens: Some(8192),
+            failover: Some(true),
+        }),
+        profiles: Vec::new(),
+        mixin: None,
+    }
+}
+
+fn config_preset_profile(preset: &str) -> Result<ConfigProfileToml> {
+    let mut p = ConfigProfileToml {
+        stream: Some(true),
+        timeout_secs: Some(600),
+        connect_timeout_secs: Some(30),
+        verify_tls: Some(true),
+        ..Default::default()
+    };
+    match preset {
+        "mimo" => {
+            p.name = "mimo".into();
+            p.kind = "native_oai".into();
+            p.base_url = "https://api.xiaomimimo.com/v1".into();
+            p.api_key_env = "MIMO_API_KEY".into();
+            p.auth_scheme = Some("header".into());
+            p.auth_header = Some("api-key".into());
+            p.model = "mimo-v2.5-pro".into();
+            p.api_mode = Some("chat_completions".into());
+        }
+        "deepseek" => {
+            p.name = "deepseek".into();
+            p.kind = "native_oai".into();
+            p.base_url = "https://api.deepseek.com/v1".into();
+            p.api_key_env = "DEEPSEEK_API_KEY".into();
+            p.auth_scheme = Some("bearer".into());
+            p.model = "deepseek-chat".into();
+            p.api_mode = Some("chat_completions".into());
+            p.reasoning_effort = Some("medium".into());
+        }
+        "openai" => {
+            p.name = "openai".into();
+            p.kind = "native_oai".into();
+            p.base_url = "https://api.openai.com/v1".into();
+            p.api_key_env = "OPENAI_API_KEY".into();
+            p.auth_scheme = Some("bearer".into());
+            p.model = "gpt-4.1-mini".into();
+            p.api_mode = Some("responses".into());
+            p.reasoning_effort = Some("medium".into());
+        }
+        "claude" => {
+            p.name = "claude".into();
+            p.kind = "native_claude".into();
+            p.base_url = "https://api.anthropic.com/v1".into();
+            p.api_key_env = "ANTHROPIC_API_KEY".into();
+            p.auth_scheme = Some("x-api-key".into());
+            p.model = "claude-3-5-sonnet-latest".into();
+            p.thinking_type = Some("adaptive".into());
+        }
+        "openrouter" => {
+            p.name = "openrouter".into();
+            p.kind = "native_oai".into();
+            p.base_url = "https://openrouter.ai/api/v1".into();
+            p.api_key_env = "OPENROUTER_API_KEY".into();
+            p.auth_scheme = Some("bearer".into());
+            p.model = "anthropic/claude-3.5-sonnet".into();
+            p.api_mode = Some("chat_completions".into());
+            p.headers
+                .insert("HTTP-Referer".into(), "https://koda-agent.local".into());
+            p.headers.insert("X-Title".into(), "Koda Agent".into());
+        }
+        _ => {
+            bail!("unknown preset `{preset}`; expected mimo, deepseek, openai, claude, openrouter")
+        }
+    }
+    Ok(p)
+}
+
+fn valid_profile_kind(kind: &str) -> bool {
+    matches!(kind, "native_oai" | "native_claude" | "oai" | "claude")
+}
+
+fn set_profile_field(profile: &mut ConfigProfileToml, key: &str, value: &str) -> Result<()> {
+    match key {
+        "name" => profile.name = value.to_string(),
+        "kind" => {
+            if !valid_profile_kind(value) {
+                bail!("invalid kind `{value}`");
+            }
+            profile.kind = value.to_string();
+        }
+        "base_url" => profile.base_url = value.to_string(),
+        "api_key_env" => profile.api_key_env = value.to_string(),
+        "auth_scheme" => {
+            if value.is_empty() {
+                profile.auth_scheme = None;
+            } else if matches!(
+                value,
+                "bearer" | "header" | "x-api-key" | "none" | "no-auth"
+            ) {
+                profile.auth_scheme = Some(value.to_string());
+            } else {
+                bail!("invalid auth_scheme `{value}`");
+            }
+        }
+        "auth_header" | "api_key_header" => {
+            profile.auth_header = (!value.is_empty()).then(|| value.to_string());
+        }
+        "model" => profile.model = value.to_string(),
+        "api_mode" => {
+            if value.is_empty() {
+                profile.api_mode = None;
+            } else if matches!(value, "chat_completions" | "responses") {
+                profile.api_mode = Some(value.to_string());
+            } else {
+                bail!("invalid api_mode `{value}`");
+            }
+        }
+        "stream" => profile.stream = Some(parse_cli_bool(value)?),
+        "timeout_secs" => profile.timeout_secs = Some(value.parse()?),
+        "connect_timeout_secs" => profile.connect_timeout_secs = Some(value.parse()?),
+        "verify_tls" => profile.verify_tls = Some(parse_cli_bool(value)?),
+        "temperature" => profile.temperature = Some(value.parse()?),
+        "max_tokens" => profile.max_tokens = Some(value.parse()?),
+        "reasoning_effort" => {
+            profile.reasoning_effort = (!value.is_empty()).then(|| value.to_string())
+        }
+        "thinking_type" => profile.thinking_type = (!value.is_empty()).then(|| value.to_string()),
+        "thinking_budget_tokens" => profile.thinking_budget_tokens = Some(value.parse()?),
+        "proxy" => profile.proxy = (!value.is_empty()).then(|| value.to_string()),
+        "fake_cc_system_prompt" => profile.fake_cc_system_prompt = Some(parse_cli_bool(value)?),
+        "user_agent" => profile.user_agent = (!value.is_empty()).then(|| value.to_string()),
+        _ if key.strip_prefix("headers.").is_some() => {
+            let header = key.strip_prefix("headers.").unwrap();
+            if header.trim().is_empty() {
+                bail!("header name missing");
+            }
+            if value.is_empty() {
+                profile.headers.remove(header);
+            } else {
+                profile
+                    .headers
+                    .insert(header.to_string(), value.to_string());
+            }
+        }
+        _ => bail!("unsupported profile field `{key}`"),
+    }
+    Ok(())
+}
+
+fn parse_cli_bool(value: &str) -> Result<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => bail!("invalid boolean `{value}`"),
+    }
+}
+
+fn read_config_llms(path: &Path) -> Result<Option<ConfigLlmsToml>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    toml::from_str(&text)
+        .with_context(|| format!("parse {}", path.display()))
+        .map(Some)
+}
+
+fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!(
+        "{}.tmp",
+        path.extension().and_then(|s| s.to_str()).unwrap_or("file")
+    ));
+    fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
+    Ok(())
+}
+
+fn backup_file(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let ts = chrono::Local::now().format("%Y%m%d%H%M%S");
+    let backup = path.with_extension(format!(
+        "{}.bak.{ts}",
+        path.extension().and_then(|s| s.to_str()).unwrap_or("file")
+    ));
+    fs::copy(path, &backup)
+        .with_context(|| format!("backup {} to {}", path.display(), backup.display()))?;
+    Ok(())
+}
+
+fn upsert_env_file(path: &Path, updates: &BTreeMap<String, String>) -> Result<()> {
+    let mut seen = BTreeMap::new();
+    let mut lines = Vec::new();
+    if path.exists() {
+        for line in fs::read_to_string(path)?.lines() {
+            let mut replaced = false;
+            if let Some((key, _)) = line.split_once('=')
+                && updates.contains_key(key.trim())
+            {
+                lines.push(format!(
+                    "{}={}",
+                    key.trim(),
+                    shell_env_quote(&updates[key.trim()])
+                ));
+                seen.insert(key.trim().to_string(), true);
+                replaced = true;
+            }
+            if !replaced {
+                lines.push(line.to_string());
+            }
+        }
+    }
+    for (key, value) in updates {
+        if !seen.contains_key(key) {
+            lines.push(format!("{key}={}", shell_env_quote(value)));
+        }
+    }
+    let mut text = lines.join("\n");
+    text.push('\n');
+    write_file_atomic(path, text.as_bytes())
+}
+
+fn shell_env_quote(value: &str) -> String {
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|c| c.is_whitespace() || matches!(c, '\'' | '"' | '\\' | '#'))
+    {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    } else {
+        value.to_string()
+    }
 }
 
 struct UpdateRequest<'a> {
@@ -1064,10 +2664,77 @@ fn parse_python_extras(values: &[String]) -> Result<Vec<PythonExtra>> {
     Ok(out)
 }
 
+fn discover_init_env_source(
+    root: &Path,
+    paths: &koda_agent_core::AgentPaths,
+    dest: &Path,
+) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    candidates.push(root.join(".env"));
+    candidates.push(paths.workspace_dir.join(".env"));
+    if let Some(config_dir) = default_koda_config_dir() {
+        candidates.push(config_dir.join(".env"));
+    }
+    candidates.push(paths.resource_dir.join(".env"));
+    candidates.into_iter().find(|path| {
+        path.is_file()
+            && !paths_same_when_existing(path, dest)
+            && env_file_has_key(path, "OPENAI_BASE_URL")
+            && env_file_has_key(path, "OPENAI_API_KEY")
+            && env_file_has_key(path, "OPENAI_MODEL")
+    })
+}
+
+fn discover_llms_example_source(
+    root: &Path,
+    paths: &koda_agent_core::AgentPaths,
+) -> Option<PathBuf> {
+    let mut candidates = vec![
+        root.join("config/llms.example.toml"),
+        paths.workspace_dir.join("config/llms.example.toml"),
+        paths.home_dir.join("resources/config/llms.example.toml"),
+        paths.resource_dir.join("config/llms.example.toml"),
+    ];
+    if let Some(config_dir) = default_koda_config_dir() {
+        candidates.push(config_dir.join("llms.example.toml"));
+        candidates.push(config_dir.join("config/llms.example.toml"));
+    }
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn default_env_template() -> &'static str {
+    "# Koda Agent local secrets. Prefer `koda-agent config setup <preset>`.\n\
+KODA_LLM_PROFILE=mimo\n\
+MIMO_API_KEY=\n\
+# Legacy migration-only variables; new installs should use config/llms.toml profiles.\n\
+OPENAI_BASE_URL=\n\
+OPENAI_API_KEY=\n\
+OPENAI_MODEL=\n"
+}
+
+fn secure_env_file_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(path, perms)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
 fn env_key_available(env_path: &Path, key: &str) -> bool {
     if env::var(key).is_ok_and(|value| !value.trim().is_empty()) {
         return true;
     }
+    env_file_has_key(env_path, key)
+}
+
+fn env_file_has_key(env_path: &Path, key: &str) -> bool {
     dotenvy::from_path_iter(env_path)
         .ok()
         .and_then(|iter| {
@@ -1080,6 +2747,20 @@ fn env_key_available(env_path: &Path, key: &str) -> bool {
 fn env_key_available_any(env_paths: &[&Path], key: &str) -> bool {
     env::var(key).is_ok_and(|value| !value.trim().is_empty())
         || env_paths.iter().any(|path| env_key_available(path, key))
+}
+
+fn env_value_available_any(env_paths: &[PathBuf], key: &str) -> Option<String> {
+    env::var(key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            env_paths.iter().find_map(|path| {
+                dotenvy::from_path_iter(path).ok().and_then(|iter| {
+                    iter.filter_map(|item| item.ok())
+                        .find_map(|(k, v)| (k == key && !v.trim().is_empty()).then_some(v))
+                })
+            })
+        })
 }
 
 fn install_resources(
@@ -1098,6 +2779,7 @@ fn install_resources(
             "dry_run": dry_run,
             "copied": [],
             "skipped": ["source is already the home resources directory"],
+            "removed": [],
             "missing": [],
             "doctor": resource_doctor_report(source_root, home_dir),
         }));
@@ -1105,7 +2787,8 @@ fn install_resources(
     let mut copied = Vec::new();
     let mut skipped = Vec::new();
     let mut missing = Vec::new();
-    for name in ["assets", "memory"] {
+    let mut removed = Vec::new();
+    for name in ["assets", "memory", "config"] {
         let src = source_root.join(name);
         if src.exists() {
             copy_resource_tree(
@@ -1152,6 +2835,7 @@ fn install_resources(
         &mut copied,
         &mut skipped,
     )?;
+    prune_skipped_resource_files(&dest_root, &dest_root, dry_run, &mut removed)?;
     Ok(serde_json::json!({
         "source": source_root.display().to_string(),
         "home": home_dir.display().to_string(),
@@ -1160,6 +2844,7 @@ fn install_resources(
         "dry_run": dry_run,
         "copied": copied,
         "skipped": skipped,
+        "removed": removed,
         "missing": missing,
         "doctor": resource_doctor_report(source_root, home_dir),
     }))
@@ -1271,6 +2956,36 @@ fn copy_resource_file(
     Ok(())
 }
 
+fn prune_skipped_resource_files(
+    root: &Path,
+    dest_root: &Path,
+    dry_run: bool,
+    removed: &mut Vec<String>,
+) -> Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            prune_skipped_resource_files(&path, dest_root, dry_run, removed)?;
+        } else if file_type.is_file() && should_skip_resource(&path) {
+            let rel = path
+                .strip_prefix(dest_root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            removed.push(rel);
+            if !dry_run {
+                fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn should_skip_resource(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
         return false;
@@ -1284,6 +2999,7 @@ fn should_skip_resource(path: &Path) -> bool {
             | "long_term_updates.jsonl"
             | "pending_long_term_updates.md"
             | "all_histories.txt"
+            | "llms.toml"
     ) || name.ends_with(".bak")
         || name.ends_with(".zip")
     {
@@ -1326,10 +3042,19 @@ fn allowed_memory_resource(path: &Path, name: &str) -> bool {
     if TOP_LEVEL.contains(&name) {
         return true;
     }
+    if name == "L4_raw_sessions" {
+        return true;
+    }
+    if path
+        .components()
+        .any(|c| c.as_os_str().to_str() == Some("L4_raw_sessions"))
+    {
+        return name == "compress_session.py";
+    }
     path.components().any(|c| {
         matches!(
             c.as_os_str().to_str(),
-            Some("L4_raw_sessions" | "autonomous_operation_sop" | "skill_search")
+            Some("autonomous_operation_sop" | "skill_search")
         )
     })
 }
@@ -1350,11 +3075,13 @@ fn resource_doctor_report(resource_dir: &Path, home_dir: &Path) -> serde_json::V
 fn resource_marker_report(dir: &Path) -> serde_json::Value {
     let assets = dir.join("assets");
     let memory = dir.join("memory");
+    let config = dir.join("config");
     let markers = serde_json::json!({
         "tools_schema": assets.join("tools_schema.json").is_file(),
         "sys_prompt": assets.join("sys_prompt.txt").is_file(),
         "simphtml": assets.join("simphtml_opt.js").is_file(),
         "tmwd_cdp_bridge": assets.join("tmwd_cdp_bridge/manifest.json").is_file(),
+        "llms_example": config.join("llms.example.toml").is_file(),
         "memory_sop": memory.join("memory_management_sop.md").is_file(),
         "requirements_core": dir.join("requirements-python-core.txt").is_file(),
     });
@@ -3098,6 +4825,8 @@ mod tests {
             openai_api_key: "sk-test".into(),
             openai_model: "mock".into(),
             llm_api_style: "chat".into(),
+            auth_scheme: None,
+            auth_header: None,
             max_turns: 4,
             verbose: false,
             stream: false,
@@ -3495,6 +5224,7 @@ mod tests {
         let home = d.path().join("home");
         fs::create_dir_all(source.join("assets/tmwd_cdp_bridge")).unwrap();
         fs::create_dir_all(source.join("memory")).unwrap();
+        fs::create_dir_all(source.join("config")).unwrap();
         fs::write(source.join("assets/tools_schema.json"), "[]").unwrap();
         fs::write(source.join("assets/sys_prompt.txt"), "prompt").unwrap();
         fs::write(source.join("assets/simphtml_opt.js"), "opt").unwrap();
@@ -3502,7 +5232,26 @@ mod tests {
         fs::write(source.join("assets/tmwd_cdp_bridge/config.js"), "secret").unwrap();
         fs::write(source.join("memory/memory_management_sop.md"), "sop").unwrap();
         fs::write(source.join("memory/global_mem.txt"), "runtime").unwrap();
+        fs::write(source.join("config/llms.example.toml"), "[default]\n").unwrap();
+        fs::write(source.join("config/llms.toml"), "api_key = 'secret'\n").unwrap();
+        fs::create_dir_all(source.join("memory/L4_raw_sessions")).unwrap();
+        fs::write(
+            source.join("memory/L4_raw_sessions/compress_session.py"),
+            "helper",
+        )
+        .unwrap();
+        fs::write(
+            source.join("memory/L4_raw_sessions/session_20260510_101442_6694.json"),
+            "{}",
+        )
+        .unwrap();
         fs::write(source.join("requirements-python-core.txt"), "# core").unwrap();
+        fs::create_dir_all(home.join("resources/memory/L4_raw_sessions")).unwrap();
+        fs::write(
+            home.join("resources/memory/L4_raw_sessions/session_old.json"),
+            "{}",
+        )
+        .unwrap();
 
         let report = install_resources(&source, &home, false, false).unwrap();
         assert_eq!(report["doctor"]["home"]["ok"], true);
@@ -3515,12 +5264,35 @@ mod tests {
             home.join("resources/requirements-python-core.txt")
                 .is_file()
         );
+        assert!(home.join("resources/config/llms.example.toml").is_file());
+        assert!(!home.join("resources/config/llms.toml").exists());
         assert!(
             !home
                 .join("resources/assets/tmwd_cdp_bridge/config.js")
                 .exists()
         );
         assert!(!home.join("resources/memory/global_mem.txt").exists());
+        assert!(
+            home.join("resources/memory/L4_raw_sessions/compress_session.py")
+                .exists()
+        );
+        assert!(
+            !home
+                .join("resources/memory/L4_raw_sessions/session_20260510_101442_6694.json")
+                .exists()
+        );
+        assert!(
+            !home
+                .join("resources/memory/L4_raw_sessions/session_old.json")
+                .exists()
+        );
+        assert!(
+            report["removed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str().unwrap_or_default().ends_with("session_old.json"))
+        );
         assert!(home.join("browser/tmwd_cdp_bridge/manifest.json").is_file());
         assert!(home.join("browser/tmwd_cdp_bridge/config.js").is_file());
         assert_eq!(report["doctor"]["browser"]["installed"], true);
@@ -3543,6 +5315,378 @@ mod tests {
                 .iter()
                 .any(|v| v.as_str().unwrap_or_default().contains("already"))
         );
+    }
+
+    #[test]
+    fn init_discovers_workspace_env_without_printing_values() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("workspace");
+        let home = d.path().join("home");
+        let resources = d.path().join("resources");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::write(
+            root.join(".env"),
+            "OPENAI_BASE_URL=http://localhost/v1\nOPENAI_API_KEY=sk-secret\nOPENAI_MODEL=mock\n",
+        )
+        .unwrap();
+        fs::write(root.join("config/llms.example.toml"), "[default]\n").unwrap();
+        let paths = resolve_agent_paths_with_options(
+            &root,
+            AgentPathOptions {
+                home_dir: Some(home.clone()),
+                workspace_dir: Some(root.clone()),
+                resource_dir: Some(resources),
+                executable_dir: None,
+            },
+        );
+        let source = discover_init_env_source(&root, &paths, &home.join(".env")).unwrap();
+        assert_eq!(source, root.join(".env"));
+        assert_eq!(
+            discover_llms_example_source(&root, &paths).unwrap(),
+            root.join("config/llms.example.toml")
+        );
+        let template = default_env_template();
+        assert!(template.contains("KODA_LLM_PROFILE=mimo"));
+        assert!(template.contains("MIMO_API_KEY="));
+        assert!(!template.contains("sk-"));
+    }
+
+    #[test]
+    fn init_dry_run_does_not_create_home_env() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("workspace");
+        let home = d.path().join("home");
+        fs::create_dir_all(&root).unwrap();
+        run_init(
+            &root,
+            AgentPathOptions {
+                home_dir: Some(home.clone()),
+                workspace_dir: Some(root.clone()),
+                resource_dir: Some(d.path().join("resources")),
+                executable_dir: None,
+            },
+            None,
+            false,
+            true,
+            true,
+        )
+        .unwrap();
+        assert!(!home.join(".env").exists());
+        assert!(!home.join("config/llms.example.toml").exists());
+    }
+
+    #[test]
+    fn config_setup_writes_key_to_env_not_llms_toml() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("workspace");
+        let home = d.path().join("home");
+        fs::create_dir_all(&root).unwrap();
+        let paths = resolve_agent_paths_with_options(
+            &root,
+            AgentPathOptions {
+                home_dir: Some(home.clone()),
+                workspace_dir: Some(root.clone()),
+                resource_dir: Some(d.path().join("resources")),
+                executable_dir: None,
+            },
+        );
+
+        run_config_setup(
+            &root,
+            &paths,
+            ConfigSetupRequest {
+                preset: "mimo",
+                name: None,
+                model: None,
+                base_url: None,
+                api_key_env: None,
+                api_key: Some("sk-test-secret"),
+                from_env: false,
+                set_active: true,
+                force: false,
+                yes: true,
+                dry_run: false,
+                json: true,
+            },
+        )
+        .unwrap();
+
+        let llms = fs::read_to_string(home.join("config/llms.toml")).unwrap();
+        let env_text = fs::read_to_string(home.join(".env")).unwrap();
+        assert!(llms.contains("auth_scheme = \"header\""));
+        assert!(llms.contains("auth_header = \"api-key\""));
+        assert!(llms.contains("api_key_env = \"MIMO_API_KEY\""));
+        assert!(!llms.contains("sk-test-secret"));
+        assert!(env_text.contains("KODA_LLM_PROFILE=mimo"));
+        assert!(env_text.contains("MIMO_API_KEY=sk-test-secret"));
+    }
+
+    #[test]
+    fn config_setup_from_env_reads_workspace_env_file() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("workspace");
+        let home = d.path().join("home");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(".env"), "MIMO_API_KEY=sk-from-workspace-env\n").unwrap();
+        let paths = resolve_agent_paths_with_options(
+            &root,
+            AgentPathOptions {
+                home_dir: Some(home.clone()),
+                workspace_dir: Some(root.clone()),
+                resource_dir: Some(d.path().join("resources")),
+                executable_dir: None,
+            },
+        );
+        run_config_setup(
+            &root,
+            &paths,
+            ConfigSetupRequest {
+                preset: "mimo",
+                name: None,
+                model: None,
+                base_url: None,
+                api_key_env: None,
+                api_key: None,
+                from_env: true,
+                set_active: true,
+                force: false,
+                yes: true,
+                dry_run: false,
+                json: true,
+            },
+        )
+        .unwrap();
+        let llms = fs::read_to_string(home.join("config/llms.toml")).unwrap();
+        let env_text = fs::read_to_string(home.join(".env")).unwrap();
+        assert!(!llms.contains("sk-from-workspace-env"));
+        assert!(env_text.contains("MIMO_API_KEY=sk-from-workspace-env"));
+    }
+
+    #[test]
+    fn config_validate_reports_missing_and_found_keys() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("workspace");
+        let home = d.path().join("home");
+        fs::create_dir_all(home.join("config")).unwrap();
+        fs::write(
+            home.join("config/llms.toml"),
+            r#"
+[selector]
+default = "mimo"
+
+[[profiles]]
+name = "mimo"
+kind = "native_oai"
+base_url = "https://api.xiaomimimo.com/v1"
+api_key_env = "KODA_TEST_MIMO_API_KEY"
+auth_scheme = "header"
+auth_header = "api-key"
+model = "mimo-v2.5-pro"
+api_mode = "chat_completions"
+"#,
+        )
+        .unwrap();
+        let paths = resolve_agent_paths_with_options(
+            &root,
+            AgentPathOptions {
+                home_dir: Some(home.clone()),
+                workspace_dir: Some(root.clone()),
+                resource_dir: Some(d.path().join("resources")),
+                executable_dir: None,
+            },
+        );
+        assert!(run_config_validate(&root, &paths, true).is_err());
+        fs::write(home.join(".env"), "KODA_TEST_MIMO_API_KEY=sk-test\n").unwrap();
+        assert!(run_config_validate(&root, &paths, true).is_ok());
+    }
+
+    #[test]
+    fn config_setup_preserves_env_comments_and_unknown_values() {
+        let d = tempfile::tempdir().unwrap();
+        let env_path = d.path().join(".env");
+        fs::write(&env_path, "# hello\nOTHER=value\nMIMO_API_KEY=old\n").unwrap();
+        let mut updates = BTreeMap::new();
+        updates.insert("MIMO_API_KEY".to_string(), "new".to_string());
+        updates.insert("KODA_LLM_PROFILE".to_string(), "mimo".to_string());
+        upsert_env_file(&env_path, &updates).unwrap();
+        let text = fs::read_to_string(env_path).unwrap();
+        assert!(text.contains("# hello"));
+        assert!(text.contains("OTHER=value"));
+        assert!(text.contains("MIMO_API_KEY=new"));
+        assert!(text.contains("KODA_LLM_PROFILE=mimo"));
+        assert!(!text.contains("MIMO_API_KEY=old"));
+    }
+
+    #[test]
+    fn config_secret_updates_env_without_touching_llms_toml() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("workspace");
+        let home = d.path().join("home");
+        fs::create_dir_all(home.join("config")).unwrap();
+        fs::write(
+            home.join("config/llms.toml"),
+            "[selector]\ndefault = \"mimo\"\n",
+        )
+        .unwrap();
+        let paths = resolve_agent_paths_with_options(
+            &root,
+            AgentPathOptions {
+                home_dir: Some(home.clone()),
+                workspace_dir: Some(root.clone()),
+                resource_dir: Some(d.path().join("resources")),
+                executable_dir: None,
+            },
+        );
+        run_config_secret(
+            &paths,
+            "MIMO_API_KEY",
+            Some("sk-secret-from-cli"),
+            false,
+            false,
+            true,
+        )
+        .unwrap();
+        let env_text = fs::read_to_string(home.join(".env")).unwrap();
+        let llms_text = fs::read_to_string(home.join("config/llms.toml")).unwrap();
+        assert!(env_text.contains("MIMO_API_KEY=sk-secret-from-cli"));
+        assert!(!llms_text.contains("sk-secret-from-cli"));
+    }
+
+    #[test]
+    fn config_list_show_use_and_remove_manage_profiles_without_keys() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("workspace");
+        let home = d.path().join("home");
+        fs::create_dir_all(&root).unwrap();
+        let paths = resolve_agent_paths_with_options(
+            &root,
+            AgentPathOptions {
+                home_dir: Some(home.clone()),
+                workspace_dir: Some(root.clone()),
+                resource_dir: Some(d.path().join("resources")),
+                executable_dir: None,
+            },
+        );
+        run_config_setup(
+            &root,
+            &paths,
+            ConfigSetupRequest {
+                preset: "mimo",
+                name: None,
+                model: None,
+                base_url: None,
+                api_key_env: None,
+                api_key: Some("sk-mimo-secret"),
+                from_env: false,
+                set_active: true,
+                force: false,
+                yes: true,
+                dry_run: false,
+                json: true,
+            },
+        )
+        .unwrap();
+        run_config_add(
+            &paths,
+            ConfigAddRequest {
+                profile: "deepseek",
+                kind: "native_oai",
+                base_url: "https://api.deepseek.com/v1",
+                api_key_env: "DEEPSEEK_API_KEY",
+                model: "deepseek-chat",
+                api_mode: Some("chat_completions"),
+                auth_scheme: Some("bearer"),
+                auth_header: None,
+                use_profile: false,
+                force: false,
+                dry_run: false,
+                json: true,
+            },
+        )
+        .unwrap();
+        fs::write(
+            home.join(".env"),
+            "# keep\nOTHER=value\nKODA_LLM_PROFILE=mimo\nMIMO_API_KEY=sk-mimo-secret\n",
+        )
+        .unwrap();
+        run_config_list(&root, &paths, true).unwrap();
+        run_config_show(&root, &paths, Some("mimo"), true).unwrap();
+        run_config_use(&root, &paths, "deepseek", false, true).unwrap();
+        let env_text = fs::read_to_string(home.join(".env")).unwrap();
+        assert!(env_text.contains("# keep"));
+        assert!(env_text.contains("OTHER=value"));
+        assert!(env_text.contains("KODA_LLM_PROFILE=deepseek"));
+        assert!(env_text.contains("MIMO_API_KEY=sk-mimo-secret"));
+
+        run_config_set(
+            &paths,
+            "deepseek",
+            "model",
+            "deepseek-reasoner",
+            false,
+            true,
+        )
+        .unwrap();
+        run_config_set(&paths, "deepseek", "headers.X-Test", "fixture", false, true).unwrap();
+        let llms = fs::read_to_string(home.join("config/llms.toml")).unwrap();
+        assert!(llms.contains("model = \"deepseek-reasoner\""));
+        assert!(llms.contains("X-Test"));
+        assert!(!llms.contains("sk-mimo-secret"));
+
+        run_config_remove(&root, &paths, "deepseek", false, false, true).unwrap();
+        let env_text = fs::read_to_string(home.join(".env")).unwrap();
+        let llms = fs::read_to_string(home.join("config/llms.toml")).unwrap();
+        assert!(env_text.contains("KODA_LLM_PROFILE=deepseek"));
+        assert!(env_text.contains("MIMO_API_KEY=sk-mimo-secret"));
+        assert!(!llms.contains("name = \"deepseek\""));
+    }
+
+    #[test]
+    fn cli_accepts_profile_and_llm_no_alias() {
+        let args = Args::try_parse_from([
+            "koda-agent",
+            "--profile",
+            "mimo",
+            "--llm-no",
+            "1",
+            "--input",
+            "hi",
+        ])
+        .unwrap();
+        assert_eq!(args.profile.as_deref(), Some("mimo"));
+        assert_eq!(args.llm_no, Some(1));
+    }
+
+    #[test]
+    fn config_migrate_imports_legacy_openai_without_copying_key() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("workspace");
+        let home = d.path().join("home");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(".env"),
+            "OPENAI_BASE_URL=https://api.example.com/v1\nOPENAI_API_KEY=sk-legacy\nOPENAI_MODEL=gpt-test\nOPENAI_API_STYLE=responses\n",
+        )
+        .unwrap();
+        let paths = resolve_agent_paths_with_options(
+            &root,
+            AgentPathOptions {
+                home_dir: Some(home.clone()),
+                workspace_dir: Some(root.clone()),
+                resource_dir: Some(d.path().join("resources")),
+                executable_dir: None,
+            },
+        );
+        run_config_migrate(&root, &paths, "openai-compat", false, false, true).unwrap();
+        let llms = fs::read_to_string(home.join("config/llms.toml")).unwrap();
+        let env_text = fs::read_to_string(home.join(".env")).unwrap();
+        assert!(llms.contains("name = \"openai-compat\""));
+        assert!(llms.contains("api_key_env = \"OPENAI_API_KEY\""));
+        assert!(llms.contains("api_mode = \"responses\""));
+        assert!(!llms.contains("sk-legacy"));
+        assert!(env_text.contains("KODA_LLM_PROFILE=openai-compat"));
+        assert!(run_config_migrate(&root, &paths, "openai-compat", false, true, true).is_err());
     }
 
     #[test]

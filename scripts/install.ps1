@@ -28,6 +28,25 @@ function Copy-KodaResources {
   }
 }
 
+function Initialize-KodaConfig {
+  $exe = Join-Path $BinDir 'koda-agent.exe'
+  $sourceEnv = Join-Path (Get-Location).Path '.env'
+  $hasSourceEnv = Test-Path $sourceEnv
+  if (Test-Path $exe) {
+    if ($hasSourceEnv) {
+      Invoke-Step { & $exe init --from-env $sourceEnv } "$exe init --from-env $sourceEnv"
+    } else {
+      Invoke-Step { & $exe init } "$exe init"
+    }
+  } elseif (Get-Command koda-agent -ErrorAction SilentlyContinue) {
+    if ($hasSourceEnv) {
+      Invoke-Step { koda-agent init --from-env $sourceEnv } "koda-agent init --from-env $sourceEnv"
+    } else {
+      Invoke-Step { koda-agent init } 'koda-agent init'
+    }
+  }
+}
+
 if ($FromSource) {
   if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { throw 'Missing required command: cargo' }
   Invoke-Step { cargo install --path crates/koda-agent-cli --locked --root $Prefix --force } "cargo install --path crates/koda-agent-cli --locked --root $Prefix --force"
@@ -72,6 +91,7 @@ if ($FromSource) {
 }
 
 Invoke-Step { New-Item -ItemType Directory -Force -Path $DataDir | Out-Null } "create $DataDir"
+Initialize-KodaConfig
 $UserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($UserPath -notlike "*$BinDir*") {
   Invoke-Step { [Environment]::SetEnvironmentVariable('Path', "$UserPath;$BinDir", 'User') } "add $BinDir to user PATH"

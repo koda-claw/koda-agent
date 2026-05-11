@@ -187,6 +187,12 @@ pub fn default_koda_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".koda-agent"))
 }
 
+pub fn default_koda_config_dir() -> Option<PathBuf> {
+    env::var_os("KODA_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::config_dir().map(|p| p.join("koda-agent")))
+}
+
 pub fn resolve_agent_paths(current_dir: impl Into<PathBuf>) -> AgentPaths {
     resolve_agent_paths_with_options(current_dir, AgentPathOptions::default())
 }
@@ -256,6 +262,11 @@ fn config_search_roots(current_dir: &Path, paths: &AgentPaths) -> Vec<PathBuf> {
             roots.push(root.to_path_buf());
         }
     }
+    if let Some(config_dir) = default_koda_config_dir()
+        && !roots.iter().any(|existing| existing == &config_dir)
+    {
+        roots.push(config_dir);
+    }
     roots
 }
 
@@ -298,6 +309,8 @@ pub struct AgentConfig {
     pub openai_api_key: String,
     pub openai_model: String,
     pub llm_api_style: String,
+    pub auth_scheme: Option<String>,
+    pub auth_header: Option<String>,
     pub max_turns: usize,
     pub verbose: bool,
     pub stream: bool,
@@ -343,6 +356,8 @@ pub struct LlmModelConfig {
     pub api_key: String,
     pub model: String,
     pub api_style: String,
+    pub auth_scheme: Option<String>,
+    pub auth_header: Option<String>,
     pub stream: bool,
     pub timeout_secs: u64,
     pub connect_timeout_secs: u64,
@@ -360,10 +375,18 @@ pub struct LlmModelConfig {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct LlmToml {
+    selector: Option<LlmSelectorToml>,
+    defaults: Option<LlmEntry>,
+    profiles: Option<Vec<LlmEntry>>,
     default: Option<LlmEntry>,
     mixin: Option<MixinToml>,
     models: Option<Vec<LlmEntry>>,
     llms: Option<Vec<LlmEntry>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct LlmSelectorToml {
+    default: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -379,10 +402,16 @@ struct MixinToml {
 #[derive(Debug, Clone, Deserialize, Default)]
 struct LlmEntry {
     name: Option<String>,
+    kind: Option<String>,
     base_url: Option<String>,
     api_key: Option<String>,
+    api_key_env: Option<String>,
+    auth_scheme: Option<String>,
+    auth_header: Option<String>,
+    api_key_header: Option<String>,
     model: Option<String>,
     api_style: Option<String>,
+    api_mode: Option<String>,
     max_turns: Option<usize>,
     stream: Option<bool>,
     timeout_secs: Option<u64>,
@@ -426,11 +455,16 @@ impl AgentConfig {
             .iter()
             .find(|dir| dir.join("config/llms.toml").is_file())
             .cloned();
-        let toml_cfg = toml_root
+        let toml_doc = toml_root
             .as_ref()
             .and_then(|root| fs::read_to_string(root.join("config/llms.toml")).ok())
-            .and_then(|s| toml::from_str::<LlmToml>(&s).ok())
-            .and_then(|c| c.default);
+            .and_then(|s| toml::from_str::<LlmToml>(&s).ok());
+        if let Some(doc) = &toml_doc
+            && doc.profiles.as_ref().is_some_and(|p| !p.is_empty())
+        {
+            return Self::from_profile_toml(paths, toml_root.as_deref(), doc);
+        }
+        let toml_cfg = toml_doc.as_ref().and_then(|c| c.default.clone());
         let legacy_root = config_roots
             .iter()
             .find(|dir| dir.join("mykey.json").is_file() || dir.join("mykey.py").is_file())
@@ -439,21 +473,32 @@ impl AgentConfig {
             .as_deref()
             .map(load_legacy_mykey_config)
             .unwrap_or_default();
+        if toml_cfg.is_none() && legacy_cfg.default.is_none() {
+            let has_legacy_env = ["OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL"]
+                .iter()
+                .any(|key| env::var(key).is_ok_and(|value| !value.trim().is_empty()));
+            if has_legacy_env {
+                bail!(
+                    "legacy OPENAI_* environment detected without config/llms.toml; run `koda-agent config migrate` or `koda-agent config setup mimo`"
+                );
+            }
+            bail!("LLM config missing; run `koda-agent config setup mimo`");
+        }
         let openai_base_url = env::var("OPENAI_BASE_URL")
             .ok()
             .or_else(|| toml_cfg.as_ref().and_then(|c| c.base_url.clone()))
             .or_else(|| legacy_cfg.default.as_ref().and_then(|c| c.base_url.clone()))
-            .context("OPENAI_BASE_URL missing")?;
+            .context("base_url missing in LLM config; run `koda-agent config setup mimo`")?;
         let openai_api_key = env::var("OPENAI_API_KEY")
             .ok()
             .or_else(|| toml_cfg.as_ref().and_then(|c| c.api_key.clone()))
             .or_else(|| legacy_cfg.default.as_ref().and_then(|c| c.api_key.clone()))
-            .context("OPENAI_API_KEY missing")?;
+            .context("api_key missing in LLM config; run `koda-agent config secret <ENV_NAME>`")?;
         let openai_model = env::var("OPENAI_MODEL")
             .ok()
             .or_else(|| toml_cfg.as_ref().and_then(|c| c.model.clone()))
             .or_else(|| legacy_cfg.default.as_ref().and_then(|c| c.model.clone()))
-            .context("OPENAI_MODEL missing")?;
+            .context("model missing in LLM config; run `koda-agent config setup mimo`")?;
         let llm_api_style = env::var("OPENAI_API_STYLE")
             .or_else(|_| env::var("KODA_LLM_API_STYLE"))
             .ok()
@@ -571,6 +616,14 @@ impl AgentConfig {
             .and_then(entry_headers)
             .or_else(|| legacy_cfg.default.as_ref().and_then(entry_headers))
             .unwrap_or_default();
+        let auth_scheme = toml_cfg
+            .as_ref()
+            .and_then(entry_auth_scheme)
+            .or_else(|| legacy_cfg.default.as_ref().and_then(entry_auth_scheme));
+        let auth_header = toml_cfg
+            .as_ref()
+            .and_then(entry_auth_header)
+            .or_else(|| legacy_cfg.default.as_ref().and_then(entry_auth_header));
         let mixin = toml_root
             .as_deref()
             .and_then(load_mixin_config)
@@ -585,6 +638,8 @@ impl AgentConfig {
             api_key: openai_api_key.clone(),
             model: openai_model.clone(),
             api_style: llm_api_style.clone(),
+            auth_scheme: auth_scheme.clone(),
+            auth_header: auth_header.clone(),
             stream,
             timeout_secs,
             connect_timeout_secs,
@@ -619,6 +674,8 @@ impl AgentConfig {
             openai_api_key,
             openai_model,
             llm_api_style,
+            auth_scheme,
+            auth_header,
             max_turns,
             verbose: true,
             stream,
@@ -634,6 +691,72 @@ impl AgentConfig {
             proxy,
             failover,
             custom_headers,
+            mixin,
+            llm_configs,
+        })
+    }
+
+    fn from_profile_toml(
+        paths: AgentPaths,
+        toml_root: Option<&Path>,
+        doc: &LlmToml,
+    ) -> Result<Self> {
+        let profiles = doc
+            .profiles
+            .as_ref()
+            .context("llms.toml profiles missing")?;
+        let selected = env::var("KODA_LLM_PROFILE")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| doc.selector.as_ref().and_then(|s| s.default.clone()))
+            .or_else(|| profiles.first().and_then(|p| p.name.clone()))
+            .context("no LLM profile selected; run `koda-agent config setup mimo`")?;
+        let selected_idx = profiles
+            .iter()
+            .position(|p| p.name.as_deref() == Some(selected.as_str()))
+            .with_context(|| format!("active LLM profile `{selected}` does not exist"))?;
+        let defaults = doc.defaults.as_ref();
+        let mut llm_configs = Vec::new();
+        let primary = profile_to_model_config(&profiles[selected_idx], defaults)?;
+        llm_configs.push(primary.clone());
+        for (idx, profile) in profiles.iter().enumerate() {
+            if idx == selected_idx {
+                continue;
+            }
+            llm_configs.push(profile_to_model_config(profile, defaults)?);
+        }
+        let mixin = toml_root.and_then(load_mixin_config).unwrap_or_default();
+        Ok(Self {
+            home_dir: paths.home_dir,
+            workspace_dir: paths.workspace_dir,
+            root_dir: paths.resource_dir.clone(),
+            resource_dir: paths.resource_dir,
+            temp_dir: paths.temp_dir,
+            memory_dir: paths.memory_dir,
+            logs_dir: paths.logs_dir,
+            sessions_dir: paths.sessions_dir,
+            browser_dir: paths.browser_dir,
+            openai_base_url: primary.base_url.clone(),
+            openai_api_key: primary.api_key.clone(),
+            openai_model: primary.model.clone(),
+            llm_api_style: primary.api_style.clone(),
+            auth_scheme: primary.auth_scheme.clone(),
+            auth_header: primary.auth_header.clone(),
+            max_turns: defaults.and_then(|d| d.max_turns).unwrap_or(70),
+            verbose: true,
+            stream: primary.stream,
+            timeout_secs: primary.timeout_secs,
+            connect_timeout_secs: primary.connect_timeout_secs,
+            verify_tls: primary.verify_tls,
+            temperature: primary.temperature,
+            max_tokens: primary.max_tokens,
+            reasoning_effort: primary.reasoning_effort.clone(),
+            thinking_type: primary.thinking_type.clone(),
+            thinking_budget_tokens: primary.thinking_budget_tokens,
+            service_tier: primary.service_tier.clone(),
+            proxy: primary.proxy.clone(),
+            failover: primary.failover,
+            custom_headers: primary.custom_headers.clone(),
             mixin,
             llm_configs,
         })
@@ -741,6 +864,12 @@ fn load_llm_model_configs(
                 .clone()
                 .or_else(|| default_entry.and_then(|d| d.api_style.clone()))
                 .unwrap_or_else(|| primary.api_style.clone()),
+            auth_scheme: entry_auth_scheme(&entry)
+                .or_else(|| default_entry.and_then(entry_auth_scheme))
+                .or_else(|| primary.auth_scheme.clone()),
+            auth_header: entry_auth_header(&entry)
+                .or_else(|| default_entry.and_then(entry_auth_header))
+                .or_else(|| primary.auth_header.clone()),
             stream: entry
                 .stream
                 .or_else(|| default_entry.and_then(|d| d.stream))
@@ -814,6 +943,150 @@ fn load_llm_model_configs(
         }
     }
     out
+}
+
+fn profile_to_model_config(
+    profile: &LlmEntry,
+    defaults: Option<&LlmEntry>,
+) -> Result<LlmModelConfig> {
+    let model = profile
+        .model
+        .clone()
+        .or_else(|| defaults.and_then(|d| d.model.clone()))
+        .context("profile model missing")?;
+    let name = profile.name.clone().unwrap_or_else(|| model.clone());
+    let base_url = profile
+        .base_url
+        .clone()
+        .or_else(|| defaults.and_then(|d| d.base_url.clone()))
+        .with_context(|| format!("profile `{name}` base_url missing"))?;
+    let api_key_env = profile
+        .api_key_env
+        .clone()
+        .or_else(|| defaults.and_then(|d| d.api_key_env.clone()));
+    let api_key = profile
+        .api_key
+        .clone()
+        .or_else(|| defaults.and_then(|d| d.api_key.clone()))
+        .or_else(|| api_key_env.as_ref().and_then(|key| env::var(key).ok()))
+        .with_context(|| {
+            api_key_env
+                .as_ref()
+                .map(|key| {
+                    format!(
+                        "profile `{name}` missing API key; run `koda-agent config secret {key}`"
+                    )
+                })
+                .unwrap_or_else(|| format!("profile `{name}` api_key_env missing"))
+        })?;
+    let api_style = profile_api_style(profile, defaults);
+    let custom_headers = merge_headers(
+        &BTreeMap::new(),
+        defaults.and_then(entry_headers).as_ref(),
+        entry_headers(profile).as_ref(),
+    );
+    Ok(LlmModelConfig {
+        name,
+        base_url,
+        api_key,
+        model,
+        api_style,
+        auth_scheme: entry_auth_scheme(profile).or_else(|| defaults.and_then(entry_auth_scheme)),
+        auth_header: entry_auth_header(profile).or_else(|| defaults.and_then(entry_auth_header)),
+        stream: profile
+            .stream
+            .or_else(|| defaults.and_then(|d| d.stream))
+            .unwrap_or(true),
+        timeout_secs: profile
+            .timeout_secs
+            .or_else(|| defaults.and_then(|d| d.timeout_secs))
+            .unwrap_or(600),
+        connect_timeout_secs: entry_connect_timeout(profile)
+            .or_else(|| defaults.and_then(entry_connect_timeout))
+            .unwrap_or(30)
+            .max(1),
+        verify_tls: entry_verify_tls(profile)
+            .or_else(|| defaults.and_then(entry_verify_tls))
+            .unwrap_or(true),
+        temperature: profile
+            .temperature
+            .or_else(|| defaults.and_then(|d| d.temperature)),
+        max_tokens: profile
+            .max_tokens
+            .or_else(|| defaults.and_then(|d| d.max_tokens)),
+        reasoning_effort: profile
+            .reasoning_effort
+            .clone()
+            .or_else(|| defaults.and_then(|d| d.reasoning_effort.clone()))
+            .and_then(valid_reasoning_effort),
+        thinking_type: profile
+            .thinking_type
+            .clone()
+            .or_else(|| defaults.and_then(|d| d.thinking_type.clone()))
+            .and_then(valid_thinking_type),
+        thinking_budget_tokens: profile
+            .thinking_budget_tokens
+            .or_else(|| defaults.and_then(|d| d.thinking_budget_tokens)),
+        service_tier: profile
+            .service_tier
+            .clone()
+            .or_else(|| defaults.and_then(|d| d.service_tier.clone()))
+            .and_then(valid_service_tier),
+        proxy: profile
+            .proxy
+            .clone()
+            .or_else(|| defaults.and_then(|d| d.proxy.clone())),
+        failover: profile
+            .failover
+            .or_else(|| defaults.and_then(|d| d.failover))
+            .unwrap_or(true),
+        custom_headers,
+    })
+}
+
+fn profile_api_style(profile: &LlmEntry, defaults: Option<&LlmEntry>) -> String {
+    if let Some(style) = profile
+        .api_style
+        .clone()
+        .or_else(|| defaults.and_then(|d| d.api_style.clone()))
+    {
+        return style;
+    }
+    let kind = profile
+        .kind
+        .as_deref()
+        .or_else(|| defaults.and_then(|d| d.kind.as_deref()))
+        .unwrap_or("native_oai");
+    if matches!(kind, "native_claude" | "claude") {
+        return "claude".into();
+    }
+    match profile
+        .api_mode
+        .as_deref()
+        .or_else(|| defaults.and_then(|d| d.api_mode.as_deref()))
+    {
+        Some("responses" | "response") => "responses".into(),
+        _ => "chat".into(),
+    }
+}
+
+fn entry_auth_scheme(entry: &LlmEntry) -> Option<String> {
+    entry
+        .auth_scheme
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_ascii_lowercase())
+}
+
+fn entry_auth_header(entry: &LlmEntry) -> Option<String> {
+    entry
+        .auth_header
+        .as_deref()
+        .or(entry.api_key_header.as_deref())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn load_mixin_config(root_dir: &Path) -> Option<MixinConfig> {
@@ -984,10 +1257,16 @@ fn legacy_obj_to_entry(key_name: &str, obj: &serde_json::Map<String, Value>) -> 
     let custom_headers = legacy_custom_headers(key_name, obj);
     Some(LlmEntry {
         name: string_field(obj, &["name"]).or_else(|| Some(model.clone())),
+        kind: None,
         base_url: Some(base_url),
         api_key: Some(api_key),
+        api_key_env: None,
+        auth_scheme: None,
+        auth_header: None,
+        api_key_header: None,
         model: Some(model),
         api_style: Some(api_style),
+        api_mode: string_field(obj, &["api_mode"]),
         max_turns: obj
             .get("max_turns")
             .or_else(|| obj.get("max_turn"))
@@ -2195,6 +2474,18 @@ impl AgentRuntime {
     pub fn next_llm(&self, n: usize) -> Result<()> {
         self.llm.switch_llm(n)
     }
+    pub fn next_llm_by_name(&self, name: &str) -> Result<usize> {
+        let needle = name.trim();
+        let (idx, _, _) = self
+            .list_llms()
+            .into_iter()
+            .find(|(_, llm_name, _)| {
+                llm_name == needle || llm_name.starts_with(&format!("{needle} ("))
+            })
+            .with_context(|| format!("LLM profile `{needle}` does not exist"))?;
+        self.next_llm(idx)?;
+        Ok(idx)
+    }
     pub fn history_info(&self) -> Vec<String> {
         self.history_info.lock().clone()
     }
@@ -2288,7 +2579,7 @@ impl AgentRuntime {
                  /stop - 停止当前任务\n\
                  /status - 查看状态\n\
                  /llm 或 /llms - 查看当前模型列表\n\
-                 /llm <n> - 切换到第 n 个模型\n\
+                 /llm <n|name> - 按序号或 profile 名称切换模型\n\
                  /continue - 列出可恢复会话\n\
                  /continue <n> - 恢复第 n 个会话摘要\n\
                  /new - 开启新对话并清空当前上下文\n\
@@ -2341,12 +2632,13 @@ impl AgentRuntime {
                 .join("\n");
             return Ok(Some(format!("LLMs:\n{lines}")));
         }
-        if let Some(n) = trimmed
-            .strip_prefix("/llm ")
-            .and_then(|s| s.trim().parse::<usize>().ok())
-        {
-            self.next_llm(n)?;
-            return Ok(Some(format!("✅ 已切换到模型 #{n}")));
+        if let Some(target) = trimmed.strip_prefix("/llm ").map(str::trim) {
+            if let Ok(n) = target.parse::<usize>() {
+                self.next_llm(n)?;
+                return Ok(Some(format!("✅ 已切换到模型 #{n}")));
+            }
+            let n = self.next_llm_by_name(target)?;
+            return Ok(Some(format!("✅ 已切换到模型 `{target}` (#{n})")));
         }
         if let Some((key, value)) = trimmed
             .strip_prefix("/session.")
@@ -2879,6 +3171,12 @@ fn fold_earlier_history(lines: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     fn write_resource_markers(dir: &Path) {
         fs::create_dir_all(dir.join("assets")).unwrap();
@@ -3003,6 +3301,275 @@ model = "test-model"
     }
 
     #[test]
+    fn agent_config_loads_profile_toml_without_openai_env() {
+        let _guard = env_lock();
+        unsafe {
+            env::remove_var("OPENAI_BASE_URL");
+            env::remove_var("OPENAI_API_KEY");
+            env::remove_var("OPENAI_MODEL");
+            env::remove_var("KODA_LLM_PROFILE");
+            env::set_var("KODA_TEST_MIMO_KEY", "sk-mimo-test");
+        }
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home");
+        fs::create_dir_all(home.join("config")).unwrap();
+        fs::write(
+            home.join("config/llms.toml"),
+            r#"
+[selector]
+default = "mimo"
+
+[defaults]
+timeout_secs = 123
+
+[[profiles]]
+name = "mimo"
+kind = "native_oai"
+base_url = "https://api.xiaomimimo.com/v1"
+api_key_env = "KODA_TEST_MIMO_KEY"
+auth_scheme = "header"
+auth_header = "api-key"
+model = "mimo-v2.5"
+"#,
+        )
+        .unwrap();
+        let cfg = AgentConfig::from_env_with_path_options(
+            d.path().join("workspace"),
+            AgentPathOptions {
+                home_dir: Some(home),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.openai_model, "mimo-v2.5");
+        assert_eq!(cfg.openai_api_key, "sk-mimo-test");
+        assert_eq!(cfg.openai_base_url, "https://api.xiaomimimo.com/v1");
+        assert_eq!(cfg.auth_scheme.as_deref(), Some("header"));
+        assert_eq!(cfg.auth_header.as_deref(), Some("api-key"));
+        assert_eq!(cfg.timeout_secs, 123);
+        unsafe {
+            env::remove_var("KODA_TEST_MIMO_KEY");
+        }
+    }
+
+    #[test]
+    fn agent_config_selects_profile_from_koda_llm_profile() {
+        let _guard = env_lock();
+        unsafe {
+            env::remove_var("OPENAI_BASE_URL");
+            env::remove_var("OPENAI_API_KEY");
+            env::remove_var("OPENAI_MODEL");
+            env::set_var("KODA_LLM_PROFILE", "backup");
+            env::set_var("KODA_TEST_PRIMARY_KEY", "sk-primary-test");
+            env::set_var("KODA_TEST_BACKUP_KEY", "sk-backup-test");
+        }
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home");
+        fs::create_dir_all(home.join("config")).unwrap();
+        fs::write(
+            home.join("config/llms.toml"),
+            r#"
+[selector]
+default = "primary"
+
+[[profiles]]
+name = "primary"
+base_url = "http://primary"
+api_key_env = "KODA_TEST_PRIMARY_KEY"
+model = "primary-model"
+
+[[profiles]]
+name = "backup"
+base_url = "http://backup"
+api_key_env = "KODA_TEST_BACKUP_KEY"
+model = "backup-model"
+api_mode = "responses"
+"#,
+        )
+        .unwrap();
+        let cfg = AgentConfig::from_env_with_path_options(
+            d.path().join("workspace"),
+            AgentPathOptions {
+                home_dir: Some(home),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.openai_model, "backup-model");
+        assert_eq!(cfg.llm_api_style, "responses");
+        assert_eq!(cfg.openai_api_key, "sk-backup-test");
+        assert_eq!(cfg.llm_configs[0].name, "backup");
+        assert_eq!(cfg.llm_configs[1].name, "primary");
+        unsafe {
+            env::remove_var("KODA_LLM_PROFILE");
+            env::remove_var("KODA_TEST_PRIMARY_KEY");
+            env::remove_var("KODA_TEST_BACKUP_KEY");
+        }
+    }
+
+    #[test]
+    fn agent_config_profile_missing_secret_points_to_config_secret() {
+        let _guard = env_lock();
+        unsafe {
+            env::remove_var("OPENAI_BASE_URL");
+            env::remove_var("OPENAI_API_KEY");
+            env::remove_var("OPENAI_MODEL");
+            env::remove_var("KODA_LLM_PROFILE");
+            env::remove_var("KODA_TEST_MISSING_KEY");
+        }
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home");
+        fs::create_dir_all(home.join("config")).unwrap();
+        fs::write(
+            home.join("config/llms.toml"),
+            r#"
+[[profiles]]
+name = "mimo"
+base_url = "http://mimo"
+api_key_env = "KODA_TEST_MISSING_KEY"
+model = "mimo"
+"#,
+        )
+        .unwrap();
+        let err = AgentConfig::from_env_with_path_options(
+            d.path().join("workspace"),
+            AgentPathOptions {
+                home_dir: Some(home),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("koda-agent config secret KODA_TEST_MISSING_KEY"));
+    }
+
+    #[test]
+    fn agent_config_rejects_legacy_openai_env_without_llms_toml() {
+        let _guard = env_lock();
+        unsafe {
+            env::set_var("OPENAI_BASE_URL", "http://legacy");
+            env::set_var("OPENAI_API_KEY", "sk-legacy");
+            env::set_var("OPENAI_MODEL", "legacy-model");
+            env::remove_var("KODA_LLM_PROFILE");
+        }
+        let d = tempfile::tempdir().unwrap();
+        let err = AgentConfig::from_env_with_path_options(
+            d.path().join("workspace"),
+            AgentPathOptions {
+                home_dir: Some(d.path().join("home")),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("koda-agent config migrate"));
+        unsafe {
+            env::remove_var("OPENAI_BASE_URL");
+            env::remove_var("OPENAI_API_KEY");
+            env::remove_var("OPENAI_MODEL");
+        }
+    }
+
+    struct TestSwitchLlm {
+        current: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl LlmClient for TestSwitchLlm {
+        async fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _tools_schema: &Value,
+        ) -> Result<AgentResponse> {
+            Ok(AgentResponse {
+                thinking: String::new(),
+                content: String::new(),
+                tool_calls: Vec::new(),
+                raw: json!(null),
+            })
+        }
+        fn name(&self) -> String {
+            "primary".into()
+        }
+        fn list_llms(&self) -> Vec<(usize, String, bool)> {
+            let current = *self.current.lock().unwrap();
+            vec![
+                (0, "mimo (mimo-v2.5)".into(), current == 0),
+                (1, "deepseek (deepseek-chat)".into(), current == 1),
+            ]
+        }
+        fn switch_llm(&self, n: usize) -> Result<()> {
+            if n > 1 {
+                bail!("bad index");
+            }
+            *self.current.lock().unwrap() = n;
+            Ok(())
+        }
+    }
+
+    struct NoopTools;
+
+    #[async_trait]
+    impl ToolDispatcher for NoopTools {
+        async fn dispatch(
+            &self,
+            _name: &str,
+            _args: Value,
+            _response: &AgentResponse,
+            _index: usize,
+        ) -> Result<StepOutcome> {
+            Ok(StepOutcome::done(json!(null)))
+        }
+    }
+
+    #[test]
+    fn runtime_switches_llm_by_profile_name() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = AgentConfig {
+            home_dir: d.path().into(),
+            workspace_dir: d.path().into(),
+            resource_dir: d.path().into(),
+            root_dir: d.path().into(),
+            temp_dir: d.path().join("temp"),
+            memory_dir: d.path().join("memory"),
+            logs_dir: d.path().join("logs"),
+            sessions_dir: d.path().join("sessions"),
+            browser_dir: d.path().join("browser"),
+            openai_base_url: "http://x".into(),
+            openai_api_key: "sk-test".into(),
+            openai_model: "m".into(),
+            llm_api_style: "chat".into(),
+            auth_scheme: None,
+            auth_header: None,
+            max_turns: 1,
+            verbose: false,
+            stream: false,
+            timeout_secs: 600,
+            connect_timeout_secs: 30,
+            verify_tls: true,
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: None,
+            thinking_type: None,
+            thinking_budget_tokens: None,
+            service_tier: None,
+            proxy: None,
+            failover: true,
+            custom_headers: BTreeMap::new(),
+            mixin: MixinConfig::default(),
+            llm_configs: vec![],
+        };
+        let rt = AgentRuntime::new(
+            cfg,
+            Arc::new(TestSwitchLlm {
+                current: Mutex::new(0),
+            }),
+            Arc::new(NoopTools),
+        )
+        .unwrap();
+        assert_eq!(rt.next_llm_by_name("deepseek").unwrap(), 1);
+        assert!(rt.list_llms()[1].2);
+    }
+
+    #[test]
     fn url_building_matches_openai_compat() {
         assert_eq!(
             auto_make_url("http://x:1", "chat/completions"),
@@ -3062,6 +3629,8 @@ model = "test-model"
             openai_api_key: "sk-test".into(),
             openai_model: "m".into(),
             llm_api_style: "chat".into(),
+            auth_scheme: None,
+            auth_header: None,
             max_turns: 1,
             verbose: false,
             stream: false,
@@ -3104,6 +3673,8 @@ model = "test-model"
             openai_api_key: "sk-test".into(),
             openai_model: "m".into(),
             llm_api_style: "chat".into(),
+            auth_scheme: None,
+            auth_header: None,
             max_turns: 1,
             verbose: false,
             stream: false,
@@ -3157,6 +3728,8 @@ model = "test-model"
             openai_api_key: "sk-test".into(),
             openai_model: "m".into(),
             llm_api_style: "chat".into(),
+            auth_scheme: None,
+            auth_header: None,
             max_turns: 1,
             verbose: false,
             stream: false,
@@ -3241,6 +3814,8 @@ max_tokens = 2048
             api_key: "sk-primary".into(),
             model: "primary-model".into(),
             api_style: "chat".into(),
+            auth_scheme: None,
+            auth_header: None,
             stream: false,
             timeout_secs: 111,
             connect_timeout_secs: 30,

@@ -34,6 +34,7 @@ pub(super) enum LayoutMode {
 #[derive(Clone, Debug)]
 pub(super) struct TuiAppState {
     pub(super) root_label: String,
+    pub(super) profile_label: String,
     pub(super) model_label: String,
     pub(super) api_mode: String,
     pub(super) stream_enabled: bool,
@@ -89,6 +90,11 @@ impl TuiAppState {
         );
         Self {
             root_label: cfg.workspace_dir.display().to_string(),
+            profile_label: cfg
+                .llm_configs
+                .first()
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| cfg.openai_model.clone()),
             model_label: cfg.openai_model.clone(),
             api_mode: cfg.llm_api_style.clone(),
             stream_enabled: cfg.stream,

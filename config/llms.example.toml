@@ -1,52 +1,78 @@
-[default]
-base_url = "https://api.openai.com/v1"
-api_key = "sk-..."
-model = "gpt-4.1-mini"
-api_style = "chat"
-max_turns = 170
-stream = true
-timeout_secs = 600 # set 0 to disable reqwest's total request timeout; useful for very long contexts
-connect_timeout = 30
-verify = true
+# Koda Agent LLM profiles. Copy to ~/.koda-agent/config/llms.toml or run:
+#   koda-agent config setup mimo
+# Secrets should live in ~/.koda-agent/.env, not in this TOML file.
 
-[mixin]
-llm_nos = [0, "deepseek"] # optional ordered fallback group; empty means all configured models
-max_retries = 3
-base_delay = 1.5
-spring_back = 300
+[selector]
+default = "mimo"
 
-[[models]]
-name = "deepseek"
-base_url = "https://api.deepseek.com/v1"
-api_key = "sk-..."
-model = "deepseek-chat"
-api_style = "chat"
+[defaults]
 stream = true
 timeout_secs = 600
 connect_timeout_secs = 30
 verify_tls = true
 temperature = 1.0
 max_tokens = 8192
-reasoning_effort = "medium" # none|minimal|low|medium|high|xhigh
-service_tier = "auto"       # auto|default|priority|flex
-proxy = ""                  # optional http(s) proxy
 failover = true
 
-[models.headers]
-"x-extra-provider-header" = "value"
-
-[[models]]
-name = "claude"
-base_url = "https://api.anthropic.com/v1"
-api_key = "sk-ant-..."
-model = "claude-3-5-sonnet-latest"
-api_style = "claude"
+[[profiles]]
+name = "mimo"
+kind = "native_oai"
+base_url = "https://api.xiaomimimo.com/v1"
+api_key_env = "MIMO_API_KEY"
+auth_scheme = "header"
+auth_header = "api-key"
+model = "mimo-v2.5-pro"
+api_mode = "chat_completions"
 stream = true
-timeout_secs = 600
-thinking_type = "adaptive" # adaptive|enabled|disabled; enabled also needs thinking_budget_tokens
-# thinking_budget_tokens = 32768
 
-# Claude Messages API example:
-# base_url = "https://api.anthropic.com/v1"
-# model = "claude-3-5-sonnet-latest"
-# api_style = "claude"
+[[profiles]]
+name = "deepseek"
+kind = "native_oai"
+base_url = "https://api.deepseek.com/v1"
+api_key_env = "DEEPSEEK_API_KEY"
+auth_scheme = "bearer"
+model = "deepseek-chat"
+api_mode = "chat_completions"
+stream = true
+reasoning_effort = "medium"
+
+[[profiles]]
+name = "openai"
+kind = "native_oai"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+auth_scheme = "bearer"
+model = "gpt-4.1-mini"
+api_mode = "responses"
+stream = true
+reasoning_effort = "medium"
+
+[[profiles]]
+name = "claude"
+kind = "native_claude"
+base_url = "https://api.anthropic.com/v1"
+api_key_env = "ANTHROPIC_API_KEY"
+auth_scheme = "x-api-key"
+model = "claude-3-5-sonnet-latest"
+stream = true
+thinking_type = "adaptive"
+
+[[profiles]]
+name = "openrouter"
+kind = "native_oai"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+auth_scheme = "bearer"
+model = "anthropic/claude-3.5-sonnet"
+api_mode = "chat_completions"
+stream = true
+
+[profiles.headers]
+HTTP-Referer = "https://koda-agent.local"
+X-Title = "Koda Agent"
+
+[mixin]
+llm_nos = ["mimo", "deepseek", "openai"]
+max_retries = 3
+base_delay = 1.5
+spring_back = 300

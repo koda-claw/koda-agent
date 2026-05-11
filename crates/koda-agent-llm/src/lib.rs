@@ -310,6 +310,8 @@ fn model_config_from_agent(cfg: &AgentConfig) -> LlmModelConfig {
         api_key: cfg.openai_api_key.clone(),
         model: cfg.openai_model.clone(),
         api_style: cfg.llm_api_style.clone(),
+        auth_scheme: cfg.auth_scheme.clone(),
+        auth_header: cfg.auth_header.clone(),
         stream: cfg.stream,
         timeout_secs: cfg.timeout_secs,
         connect_timeout_secs: cfg.connect_timeout_secs,
@@ -332,6 +334,8 @@ fn agent_config_for_model(base: &AgentConfig, model: &LlmModelConfig) -> AgentCo
     cfg.openai_api_key = model.api_key.clone();
     cfg.openai_model = model.model.clone();
     cfg.llm_api_style = model.api_style.clone();
+    cfg.auth_scheme = model.auth_scheme.clone();
+    cfg.auth_header = model.auth_header.clone();
     cfg.stream = model.stream;
     cfg.timeout_secs = model.timeout_secs;
     cfg.connect_timeout_secs = model.connect_timeout_secs;
@@ -922,21 +926,7 @@ impl OpenAiClient {
             "max_tokens": self.cfg.max_tokens.unwrap_or(8192)
         });
         apply_claude_options(&mut payload, &self.cfg);
-        let req = self
-            .http
-            .post(url)
-            .header(
-                if self.cfg.openai_api_key.starts_with("sk-ant-") {
-                    "x-api-key"
-                } else {
-                    "authorization"
-                },
-                if self.cfg.openai_api_key.starts_with("sk-ant-") {
-                    self.cfg.openai_api_key.clone()
-                } else {
-                    format!("Bearer {}", self.cfg.openai_api_key)
-                },
-            )
+        let req = apply_auth_header(self.http.post(url), &self.cfg)
             .header("anthropic-version", "2023-06-01")
             .header("anthropic-beta", beta);
         let req = apply_custom_headers(req, &self.cfg).json(&payload);
@@ -1024,7 +1014,7 @@ impl OpenAiClient {
             .max(1);
         let mut last_error = None;
         for attempt in 1..=attempts {
-            let req = self.http.post(url).bearer_auth(&self.cfg.openai_api_key);
+            let req = apply_auth_header(self.http.post(url), &self.cfg);
             match apply_custom_headers(req, &self.cfg)
                 .json(payload)
                 .send()
@@ -1153,6 +1143,32 @@ fn apply_custom_headers(
         req = req.header(k.as_str(), v.as_str());
     }
     req
+}
+
+fn apply_auth_header(
+    mut req: reqwest::RequestBuilder,
+    cfg: &AgentConfig,
+) -> reqwest::RequestBuilder {
+    let scheme = cfg.auth_scheme.as_deref().unwrap_or_else(|| {
+        if cfg.llm_api_style == "claude" && cfg.openai_api_key.starts_with("sk-ant-") {
+            "x-api-key"
+        } else {
+            "bearer"
+        }
+    });
+    match scheme {
+        "header" => {
+            if let Some(header) = cfg.auth_header.as_deref().filter(|v| !v.is_empty()) {
+                req = req.header(header, cfg.openai_api_key.as_str());
+            } else {
+                req = req.bearer_auth(&cfg.openai_api_key);
+            }
+            req
+        }
+        "x-api-key" => req.header("x-api-key", cfg.openai_api_key.as_str()),
+        "none" | "no-auth" => req,
+        _ => req.bearer_auth(&cfg.openai_api_key),
+    }
 }
 
 fn should_retry_status(status: StatusCode) -> bool {
@@ -2615,6 +2631,8 @@ mod tests {
             openai_api_key: "sk-primary".into(),
             openai_model: "primary".into(),
             llm_api_style: "chat".into(),
+            auth_scheme: None,
+            auth_header: None,
             max_turns: 1,
             verbose: false,
             stream: false,
@@ -2638,6 +2656,8 @@ mod tests {
                     api_key: "sk-primary".into(),
                     model: "primary".into(),
                     api_style: "chat".into(),
+                    auth_scheme: None,
+                    auth_header: None,
                     stream: false,
                     timeout_secs: 600,
                     connect_timeout_secs: 30,
@@ -2658,6 +2678,8 @@ mod tests {
                     api_key: "sk-backup".into(),
                     model: "backup".into(),
                     api_style: "responses".into(),
+                    auth_scheme: None,
+                    auth_header: None,
                     stream: true,
                     timeout_secs: 900,
                     connect_timeout_secs: 30,
@@ -2686,6 +2708,39 @@ mod tests {
         let list = llm.list_llms();
         assert!(list[1].2);
         assert!(llm.switch_llm(99).is_err());
+    }
+
+    #[test]
+    fn auth_header_supports_mimo_api_key_header_without_bearer() {
+        let mut cfg = cfg_with_models();
+        cfg.openai_api_key = "sk-mimo".into();
+        cfg.auth_scheme = Some("header".into());
+        cfg.auth_header = Some("api-key".into());
+        let req = apply_auth_header(
+            reqwest::Client::new().post("http://example.invalid/v1/chat/completions"),
+            &cfg,
+        )
+        .build()
+        .unwrap();
+        assert_eq!(req.headers().get("api-key").unwrap(), "sk-mimo");
+        assert!(req.headers().get("authorization").is_none());
+    }
+
+    #[test]
+    fn auth_header_defaults_to_bearer_for_openai_compatible() {
+        let mut cfg = cfg_with_models();
+        cfg.openai_api_key = "sk-openai".into();
+        cfg.auth_scheme = None;
+        let req = apply_auth_header(
+            reqwest::Client::new().post("http://example.invalid/v1/chat/completions"),
+            &cfg,
+        )
+        .build()
+        .unwrap();
+        assert_eq!(
+            req.headers().get("authorization").unwrap(),
+            "Bearer sk-openai"
+        );
     }
 
     #[tokio::test]
@@ -2719,6 +2774,8 @@ mod tests {
             api_key: "sk-local".into(),
             model: "local".into(),
             api_style: "chat".into(),
+            auth_scheme: None,
+            auth_header: None,
             stream: true,
             timeout_secs: 30,
             connect_timeout_secs: 5,

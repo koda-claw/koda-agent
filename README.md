@@ -63,11 +63,13 @@ cargo run -p koda-agent-cli -- frontend tmwebdriver
 cargo run -p koda-agent-cli -- memory settle
 cargo run -p koda-agent-cli -- memory settle --assisted
 cargo run -p koda-agent-cli -- memory l4-archive --run
+cargo run -p koda-agent-cli -- config setup mimo
+cargo run -p koda-agent-cli -- config secret MIMO_API_KEY --from-stdin
 cargo run -p koda-agent-cli -- update --dry-run
 cargo run -p koda-agent-cli -- update --check --json
 ```
 
-Configuration is read from `.env` (`OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`) and optional `config/llms.toml`. If TOML is absent, simple upstream-style `mykey.json` or `mykey.py` dict assignments are imported as a compatibility fallback. Set `OPENAI_API_STYLE=responses` to use the OpenAI Responses API wire shape, or `OPENAI_API_STYLE=claude` for Anthropic `/v1/messages`. Secrets are redacted in logs.
+LLM configuration is `llms.toml` first. Normal users can run `koda-agent config setup mimo`, save the key with `koda-agent config secret MIMO_API_KEY --from-stdin`, then launch `koda-agent tui --full`. Profiles live in `~/.koda-agent/config/llms.toml`; secrets and `KODA_LLM_PROFILE` live in `~/.koda-agent/.env`. Lookup checks the current directory, explicit workspace, `~/.koda-agent`, installed resources, and the platform config directory such as `~/.config/koda-agent`. If TOML is absent, simple upstream-style `mykey.json` or `mykey.py` dict assignments are imported as a compatibility fallback. Legacy `OPENAI_BASE_URL` / `OPENAI_MODEL` environment fallback remains for migration but is no longer the recommended path. Secrets are redacted in logs.
 
 ## Validation
 
@@ -79,39 +81,55 @@ cargo test --workspace --all-features
 
 ## Configuration
 
-Priority is `.env` first, then `config/llms.toml`, then optional legacy `mykey.json` / `mykey.py` compatibility:
+The primary configuration is `~/.koda-agent/config/llms.toml` plus `~/.koda-agent/.env`:
+
+```bash
+koda-agent init
+koda-agent config setup mimo --yes
+koda-agent config secret MIMO_API_KEY --from-stdin
+koda-agent config list
+koda-agent config use mimo
+koda-agent config migrate # one-time import for legacy OPENAI_* .env users
+koda-agent config validate
+koda-agent doctor
+```
 
 ```toml
-[default]
-base_url = "https://api.openai.com/v1"
-api_key = "sk-..."
-model = "gpt-4.1-mini"
-api_style = "chat" # or "responses"
-max_turns = 70
-stream = false
-timeout_secs = 600 # set 0 to disable total request timeout for very long responses
-temperature = 1.0
+[selector]
+default = "mimo"
+
+[defaults]
+stream = true
+timeout_secs = 600
 max_tokens = 8192
-reasoning_effort = "medium"
-service_tier = "auto"
-proxy = ""
 failover = true
 
+[[profiles]]
+name = "mimo"
+kind = "native_oai"
+base_url = "https://api.xiaomimimo.com/v1"
+api_key_env = "MIMO_API_KEY"
+auth_scheme = "header"
+auth_header = "api-key"
+model = "mimo-v2.5-pro"
+api_mode = "chat_completions"
+
 [mixin]
-llm_nos = [0, "backup"] # optional MixinSession-style ordered fallback group
+llm_nos = ["mimo", "backup"] # optional MixinSession-style ordered fallback group
 max_retries = 3
 base_delay = 1.5
 spring_back = 300
 
-[[models]]
+[[profiles]]
 name = "backup"
+kind = "native_oai"
 base_url = "https://api.openai.com/v1"
-api_key = "sk-..."
+api_key_env = "OPENAI_API_KEY"
 model = "gpt-4.1"
-api_style = "chat"
+api_mode = "chat_completions"
 stream = true
 
-[models.headers]
+[profiles.headers]
 "x-provider-header" = "value"
 ```
 

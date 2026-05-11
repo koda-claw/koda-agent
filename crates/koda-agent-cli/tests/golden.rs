@@ -34,6 +34,8 @@ fn cfg(root: &std::path::Path) -> AgentConfig {
         openai_api_key: "sk-test".into(),
         openai_model: "mock".into(),
         llm_api_style: "chat".into(),
+        auth_scheme: None,
+        auth_header: None,
         max_turns: 4,
         verbose: false,
         stream: false,

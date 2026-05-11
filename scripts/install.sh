@@ -63,6 +63,25 @@ copy_resources() {
   fi
 }
 
+init_config() {
+  local exe="$BIN_DIR/koda-agent"
+  local source_env=""
+  [[ -f "$(pwd)/.env" ]] && source_env="$(pwd)/.env"
+  if [[ -x "$exe" ]]; then
+    if [[ -n "$source_env" ]]; then
+      run "$exe" init --from-env "$source_env"
+    else
+      run "$exe" init
+    fi
+  elif command -v koda-agent >/dev/null 2>&1; then
+    if [[ -n "$source_env" ]]; then
+      run koda-agent init --from-env "$source_env"
+    else
+      run koda-agent init
+    fi
+  fi
+}
+
 if [[ "$FROM_SOURCE" == 1 ]]; then
   need cargo
   run cargo install --path crates/koda-agent-cli --locked --root "$PREFIX" --force
@@ -106,6 +125,7 @@ else
 fi
 
 run mkdir -p "$DATA_DIR" "$HOME/.config/koda-agent"
+init_config
 
 if [[ "$INSTALL_PYTHON" == 1 ]]; then
   if [[ -x "$BIN_DIR/koda-agent" ]]; then

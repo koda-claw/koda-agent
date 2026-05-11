@@ -44,4 +44,4 @@ git push origin v0.1.0
 
 Release notes should include compatibility changes, LLM protocol changes,
 security-sensitive fixes, installer changes, and known gaps versus upstream
-GenericAgent.
+GenericAgent. Keep the current draft in `docs/release-notes.md`.

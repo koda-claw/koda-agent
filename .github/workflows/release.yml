@@ -48,10 +48,12 @@ jobs:
           mkdir -p dist/pkg
           cp target/${{ matrix.target }}/release/koda-agent dist/pkg/koda-agent
           mkdir -p dist/pkg/resources
-          cp -R assets memory dist/pkg/resources/
+          cp -R assets memory config dist/pkg/resources/
           cp requirements-python-*.txt dist/pkg/resources/
           rm -f dist/pkg/resources/assets/tmwd_cdp_bridge/config.js
+          rm -f dist/pkg/resources/config/llms.toml
           rm -f dist/pkg/resources/memory/global_mem.txt dist/pkg/resources/memory/global_mem_insight.txt dist/pkg/resources/memory/file_access_stats.json dist/pkg/resources/memory/long_term_updates.jsonl dist/pkg/resources/memory/pending_long_term_updates.md
+          find dist/pkg/resources/memory/L4_raw_sessions -type f ! -name compress_session.py -delete
           tar -C dist/pkg -czf dist/koda-agent-${{ matrix.target }}.tar.gz koda-agent resources
           (cd dist && shasum -a 256 koda-agent-${{ matrix.target }}.tar.gz > koda-agent-${{ matrix.target }}.tar.gz.sha256)
       - name: Package Windows
@@ -61,10 +63,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist/pkg | Out-Null
           Copy-Item target/${{ matrix.target }}/release/koda-agent.exe dist/pkg/koda-agent.exe
           New-Item -ItemType Directory -Force -Path dist/pkg/resources | Out-Null
-          Copy-Item -Recurse -Force assets, memory dist/pkg/resources/
+          Copy-Item -Recurse -Force assets, memory, config dist/pkg/resources/
           Copy-Item -Force requirements-python-*.txt dist/pkg/resources/
           Remove-Item -Force -ErrorAction SilentlyContinue dist/pkg/resources/assets/tmwd_cdp_bridge/config.js
+          Remove-Item -Force -ErrorAction SilentlyContinue dist/pkg/resources/config/llms.toml
           Remove-Item -Force -ErrorAction SilentlyContinue dist/pkg/resources/memory/global_mem.txt, dist/pkg/resources/memory/global_mem_insight.txt, dist/pkg/resources/memory/file_access_stats.json, dist/pkg/resources/memory/long_term_updates.jsonl, dist/pkg/resources/memory/pending_long_term_updates.md
+          Get-ChildItem -Path dist/pkg/resources/memory/L4_raw_sessions -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'compress_session.py' } | Remove-Item -Force
           Compress-Archive -Path dist/pkg/koda-agent.exe, dist/pkg/resources -DestinationPath dist/koda-agent-${{ matrix.target }}.zip -Force
           (Get-FileHash -Algorithm SHA256 dist/koda-agent-${{ matrix.target }}.zip).Hash.ToLower() + '  koda-agent-${{ matrix.target }}.zip' | Out-File -Encoding ascii dist/koda-agent-${{ matrix.target }}.zip.sha256
       - uses: actions/upload-artifact@v4
