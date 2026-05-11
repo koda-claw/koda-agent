@@ -1,16 +1,31 @@
 # Browser Extension Bridge
 
-`frontend tmwebdriver` starts the Rust TMWebDriver-compatible master for the
-unpacked extension in `assets/tmwd_cdp_bridge/`.
-
-Local runtime config is generated as:
+`frontend tmwebdriver` starts the Rust TMWebDriver-compatible master. Installed
+users should load the unpacked extension copy under Koda home:
 
 ```text
-assets/tmwd_cdp_bridge/config.js
+~/.koda-agent/browser/tmwd_cdp_bridge/
+```
+
+Source checkouts keep pristine bridge assets under:
+
+```text
+assets/tmwd_cdp_bridge/
+```
+
+Runtime config is generated in the mutable home copy:
+
+```text
+~/.koda-agent/browser/tmwd_cdp_bridge/config.js
 ```
 
 This file is ignored and must not be committed. Reload the unpacked extension in
-Edge or Chrome after config or asset changes.
+Edge or Chrome after config or asset changes. If the home copy is missing, run:
+
+```bash
+koda-agent resources install --repair
+koda-agent doctor
+```
 
 ## Smoke tests
 
@@ -33,9 +48,9 @@ check.
 
 ## Common issues
 
-- `Cannot load JavaScript config.js`: run any command that initializes the
-  runtime directories, for example `koda-agent doctor`, then reload the unpacked
-  extension.
+- `Cannot load JavaScript config.js`: run `koda-agent doctor` after
+  `koda-agent resources install --repair`, then reload the unpacked extension
+  from `~/.koda-agent/browser/tmwd_cdp_bridge`.
 - `Cannot read properties of null`: reload the extension and make sure the page
   tab is fully loaded before executing DOM-dependent commands.
 - No extension sessions: confirm the master is running and the extension has

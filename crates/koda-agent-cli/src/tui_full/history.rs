@@ -147,10 +147,15 @@ mod tests {
 
     fn cfg_with_memory(dir: &TempDir) -> AgentConfig {
         AgentConfig {
+            home_dir: dir.path().to_path_buf(),
+            workspace_dir: dir.path().to_path_buf(),
+            resource_dir: dir.path().to_path_buf(),
             root_dir: dir.path().to_path_buf(),
             temp_dir: dir.path().join("temp"),
             memory_dir: dir.path().join("memory"),
             logs_dir: dir.path().join("logs"),
+            sessions_dir: dir.path().join("sessions"),
+            browser_dir: dir.path().join("browser"),
             openai_base_url: "http://localhost".into(),
             openai_api_key: "test".into(),
             openai_model: "mock".into(),

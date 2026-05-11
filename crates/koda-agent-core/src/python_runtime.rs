@@ -1,3 +1,4 @@
+use crate::default_koda_home;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -58,6 +59,7 @@ pub enum PythonSource {
     EnvKodaPython,
     EnvPython,
     ManagedVenv,
+    LegacyManagedVenv,
     WorkspaceVenv,
     WorkspaceKodaVenv,
     SystemPath,
@@ -229,6 +231,10 @@ pub fn managed_python_venv_dir() -> Option<PathBuf> {
     {
         return Some(PathBuf::from(path));
     }
+    Some(default_koda_home().join("python").join("venv"))
+}
+
+fn legacy_managed_python_venv_dir() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         dirs::data_local_dir().map(|p| p.join("koda-agent").join("python").join("venv"))
@@ -511,6 +517,9 @@ fn push_managed(out: &mut Vec<(PythonSource, PythonCommand, Option<PathBuf>)>) {
     if let Some(venv) = managed_python_venv_dir() {
         push_venv(out, venv, PythonSource::ManagedVenv);
     }
+    if let Some(venv) = legacy_managed_python_venv_dir() {
+        push_venv(out, venv, PythonSource::LegacyManagedVenv);
+    }
 }
 
 fn push_venv(
@@ -769,6 +778,19 @@ mod tests {
     fn python_command_display_preserves_args() {
         let cmd = PythonCommand::with_args("py", vec!["-3".into()]);
         assert_eq!(cmd.display(), "py -3");
+    }
+
+    #[test]
+    fn managed_python_defaults_to_koda_home() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let d = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::remove_var("KODA_MANAGED_PYTHON_DIR");
+            std::env::set_var("KODA_AGENT_HOME", d.path());
+        }
+        let managed = managed_python_venv_dir().unwrap();
+        unsafe { std::env::remove_var("KODA_AGENT_HOME") };
+        assert_eq!(managed, d.path().join("python/venv"));
     }
 
     #[test]

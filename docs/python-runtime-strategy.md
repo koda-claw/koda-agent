@@ -25,7 +25,8 @@ The immediate problem is duplicated resolver logic and inconsistent missing-Pyth
 - Koda-managed dependencies must live in a dedicated venv, not global site-packages.
 - Do not require `activate`; always invoke the venv interpreter directly.
 - Use Rust `Command` with separate args; never build shell command strings for paths.
-- Use platform app-data directories by default, with env/workspace overrides.
+- Use Koda home by default (`~/.koda-agent/python/venv`), with env/workspace
+  overrides and legacy app-data discovery for compatibility.
 - Keep upstream compatibility: do not delete Python helper files or SOP references.
 - Installation must be explicit via CLI, not automatic during normal agent execution.
 
@@ -54,22 +55,24 @@ For agent helpers (`ocr_utils.py`, `vision_api.py`, reflect compatibility helper
 
 1. `KODA_PYTHON`, if set and executable.
 2. Legacy `PYTHON`, if set and executable.
-3. Managed venv interpreter.
-4. Workspace `.koda/python/venv` interpreter.
-5. Workspace `.venv` interpreter.
-6. System candidates: `python3`, `python`.
-7. Windows only: `py -3` launcher.
-8. Unavailable.
+3. Managed Koda home venv interpreter.
+4. Legacy app-data managed venv interpreter, if present.
+5. Workspace `.koda/python/venv` interpreter.
+6. Workspace `.venv` interpreter.
+7. System candidates: `python3`, `python`.
+8. Windows only: `py -3` launcher.
+9. Unavailable.
 
 For user Python snippets in `code_run`:
 
 1. `KODA_PYTHON`, if set and executable.
 2. Workspace `.venv` interpreter.
 3. Workspace `.koda/python/venv` interpreter.
-4. Managed venv interpreter.
-5. System candidates: `python3`, `python`.
-6. Windows only: `py -3` launcher.
-7. Unavailable.
+4. Managed Koda home venv interpreter.
+5. Legacy app-data managed venv interpreter, if present.
+6. System candidates: `python3`, `python`.
+7. Windows only: `py -3` launcher.
+8. Unavailable.
 
 `KODA_DISABLE_PYTHON_DISCOVERY=1` should disable managed/workspace/system discovery in tests and diagnostics, leaving only explicit `KODA_PYTHON` / `PYTHON` values.
 
@@ -100,11 +103,12 @@ Default managed venv should be user-level, not repo-level:
 
 | Platform | Managed venv | Cache |
 | --- | --- | --- |
-| macOS | `~/Library/Application Support/koda-agent/python/venv` | `~/Library/Caches/koda-agent` |
-| Linux | `$XDG_DATA_HOME/koda-agent/python/venv` or `~/.local/share/koda-agent/python/venv` | `$XDG_CACHE_HOME/koda-agent` or `~/.cache/koda-agent` |
-| Windows | `%LOCALAPPDATA%\koda-agent\python\venv` | `%LOCALAPPDATA%\koda-agent\cache` |
+| macOS/Linux | `~/.koda-agent/python/venv` | `~/.koda-agent/temp` |
+| Windows | `%USERPROFILE%\.koda-agent\python\venv` | `%USERPROFILE%\.koda-agent\temp` |
 
-Implementation can use the existing `dirs` crate first; if later we want app-specific semantics, switch to `directories::ProjectDirs`.
+`KODA_AGENT_HOME` changes the base directory. `KODA_MANAGED_PYTHON_DIR` remains
+an escape hatch for advanced users and tests. Legacy app-data managed venvs are
+only discovery fallbacks, not the target for new bootstrap/remove operations.
 
 ## Rust API Shape
 
@@ -311,7 +315,8 @@ Doctor probes must avoid importing from the current project directory for agent-
 - Prefer direct `venv\Scripts\python.exe` calls.
 - Check `py -3` after `python` candidates.
 - Paths may contain spaces; all process launching must use `Command.arg`.
-- Store managed venv under `%LOCALAPPDATA%`.
+- Store managed venv under `%USERPROFILE%\.koda-agent\python\venv` unless
+  `KODA_AGENT_HOME` or `KODA_MANAGED_PYTHON_DIR` overrides it.
 - OCR/Tesseract and ADB are separate binary checks.
 
 ### Linux
@@ -319,7 +324,8 @@ Doctor probes must avoid importing from the current project directory for agent-
 - Debian/Ubuntu may require `python3-venv`.
 - PEP 668 is fine because packages install inside venv.
 - Native OCR may need distro packages such as `tesseract-ocr`, `libgl1`, or `libglib2.0-0`; doctor should only report these, not guess-install.
-- Respect `XDG_DATA_HOME` and `XDG_CACHE_HOME`.
+- Respect `KODA_AGENT_HOME`; do not write helper runtime state into the
+  workspace or source checkout.
 
 ### macOS
 

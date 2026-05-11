@@ -6,8 +6,9 @@
 make release-dry-run
 ```
 
-This builds the release binary, writes `dist/SHA256SUMS`, and checks that the
-binary starts and can emit `doctor --json`.
+This builds the release binary, assembles a local archive containing
+`koda-agent` plus `resources/`, writes `dist/SHA256SUMS`, and checks that the
+binary starts and can emit `doctor --json` against the packaged resources.
 
 ## Pre-release gates
 

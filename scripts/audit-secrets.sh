@@ -4,10 +4,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 printf '%s\n' '== tracked suspicious path scan =='
-git ls-files | rg -i '(^\.env$|^config/llms\.toml$|memory/L4_raw_sessions/(session_.*\.json|all_histories\.txt)$|(^|/)logs/|\.bak$|erp_order_query_sop\.md|assets/tmwd_cdp_bridge/config\.js$)' || true
+git ls-files | rg -i '(^\.env$|^config/llms\.toml$|(^|/)\.koda-agent/|memory/L4_raw_sessions/(session_.*\.json|all_histories\.txt)$|(^|/)logs/|\.bak$|erp_order_query_sop\.md|assets/tmwd_cdp_bridge/config\.js$|browser/tmwd_cdp_bridge/config\.js$)' || true
 
 printf '%s\n' '== ignored private/runtime files =='
-git status --ignored --short | rg -i '(\.env|L4_raw_sessions|logs|erp_order|config\.js|\.bak)' || true
+git status --ignored --short | rg -i '(\.env|\.koda-agent|L4_raw_sessions|logs|erp_order|config\.js|\.bak)' || true
 
 printf '%s\n' '== tracked content scan =='
 if git grep -n -i \

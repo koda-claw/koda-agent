@@ -1658,10 +1658,15 @@ fn unique_temp_root(prefix: &str) -> Result<PathBuf> {
 
 fn smoke_agent_config(root: &Path) -> AgentConfig {
     AgentConfig {
+        home_dir: root.into(),
+        workspace_dir: root.into(),
+        resource_dir: root.into(),
         root_dir: root.into(),
         temp_dir: root.join("temp"),
         memory_dir: root.join("memory"),
         logs_dir: root.join("logs"),
+        sessions_dir: root.join("sessions"),
+        browser_dir: root.join("browser"),
         openai_base_url: "http://127.0.0.1/unused".into(),
         openai_api_key: "sk-redacted".into(),
         openai_model: "unused".into(),

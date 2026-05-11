@@ -15,16 +15,21 @@ fn fixture_root() -> tempfile::TempDir {
         "You are GenericAgent.",
     )
     .unwrap();
-    fs::write(d.path().join("temp/input.txt"), "alpha\n").unwrap();
+    fs::write(d.path().join("input.txt"), "alpha\n").unwrap();
     d
 }
 
 fn cfg(root: &std::path::Path) -> AgentConfig {
     AgentConfig {
+        home_dir: root.into(),
+        workspace_dir: root.into(),
+        resource_dir: root.into(),
         root_dir: root.into(),
         temp_dir: root.join("temp"),
         memory_dir: root.join("memory"),
         logs_dir: root.join("logs"),
+        sessions_dir: root.join("sessions"),
+        browser_dir: root.join("browser"),
         openai_base_url: "http://localhost".into(),
         openai_api_key: "sk-test".into(),
         openai_model: "mock".into(),

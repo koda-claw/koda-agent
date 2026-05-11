@@ -33,7 +33,7 @@ pub struct GenericToolDispatcher {
 
 impl GenericToolDispatcher {
     pub fn new(cfg: AgentConfig) -> Self {
-        let cwd = cfg.temp_dir.clone();
+        let cwd = cfg.workspace_dir.clone();
         Self {
             cfg,
             cwd,
@@ -52,15 +52,21 @@ impl GenericToolDispatcher {
     fn write_abs(&self, p: Option<&str>) -> PathBuf {
         let p = p.unwrap_or("").trim();
         if p.is_empty() || p == "/" || p == "." || p == "./" {
-            return self.cfg.root_dir.join("index.html");
+            return self.cfg.workspace_dir.join("index.html");
+        }
+        if matches!(p, "_stop" | "_stop_signal") {
+            return self.cfg.temp_dir.join(p);
         }
         if p.starts_with('/') && !p[1..].contains('/') {
-            return self.cfg.root_dir.join(&p[1..]);
+            return self.cfg.workspace_dir.join(&p[1..]);
         }
         let path = Path::new(p);
         if path.is_absolute() {
             if path.parent() == Some(Path::new("/")) {
-                return self.cfg.root_dir.join(path.file_name().unwrap_or_default());
+                return self
+                    .cfg
+                    .workspace_dir
+                    .join(path.file_name().unwrap_or_default());
             }
             path.to_path_buf()
         } else {
@@ -147,7 +153,7 @@ impl GenericToolDispatcher {
         }
         let mut tmp_path = None;
         let mut cmd = if matches!(typ, "python" | "py") {
-            let Some(py) = resolve_python(&self.cfg.root_dir, PythonPurpose::UserCode) else {
+            let Some(py) = resolve_python(&self.cfg.home_dir, PythonPurpose::UserCode) else {
                 return Ok(StepOutcome::next(
                     json!({"status":"error","code":"python_unavailable","msg":python_unavailable_message(),"fix":"koda-agent doctor; set KODA_PYTHON=/path/to/python; or use code_run type=bash"}),
                     "\n",
@@ -294,12 +300,10 @@ impl GenericToolDispatcher {
         if target.is_empty() {
             return msg;
         }
-        let mut roots = vec![
-            path.parent()
-                .and_then(Path::parent)
-                .unwrap_or(&self.cwd)
-                .to_path_buf(),
-        ];
+        let mut roots = vec![path.parent().unwrap_or(&self.cwd).to_path_buf()];
+        if !roots.iter().any(|p| p == &self.cwd) {
+            roots.push(self.cwd.clone());
+        }
         if let Ok(dirs) = self.read_dirs.lock() {
             for dir in dirs.iter() {
                 if !roots.iter().any(|p| p == dir) {
@@ -707,10 +711,12 @@ impl GenericToolDispatcher {
     }
 
     fn with_code_run_header(&self, code: &str) -> String {
-        let header = self.cfg.root_dir.join("assets/code_run_header.py");
+        let header = self.cfg.resource_dir.join("assets/code_run_header.py");
         let bootstrap = format!(
-            "import os, sys\nos.environ.setdefault('KODA_AGENT_ROOT', {root:?})\nos.environ.setdefault('KODA_MEMORY_DIR', {memory:?})\nfor _koda_p in [{memory:?}, os.path.join({root:?}, 'memory')]:\n    if _koda_p and _koda_p not in sys.path: sys.path.insert(0, _koda_p)\n",
-            root = self.cfg.root_dir.display().to_string(),
+            "import os, sys\nos.environ.setdefault('KODA_AGENT_HOME', {home:?})\nos.environ.setdefault('KODA_AGENT_ROOT', {resource:?})\nos.environ.setdefault('KODA_WORKSPACE', {workspace:?})\nos.environ.setdefault('KODA_MEMORY_DIR', {memory:?})\nfor _koda_p in [{memory:?}, os.path.join({resource:?}, 'memory')]:\n    if _koda_p and _koda_p not in sys.path: sys.path.insert(0, _koda_p)\n",
+            home = self.cfg.home_dir.display().to_string(),
+            resource = self.cfg.resource_dir.display().to_string(),
+            workspace = self.cfg.workspace_dir.display().to_string(),
             memory = self.cfg.memory_dir.display().to_string()
         );
         match fs::read_to_string(header) {
@@ -720,12 +726,15 @@ impl GenericToolDispatcher {
     }
 
     fn browser_extract_expr(&self, text_only: bool, cutlist: bool, instruction: &str) -> String {
-        let opt = self.cfg.root_dir.join("assets/simphtml_opt.js");
+        let opt = self.cfg.resource_dir.join("assets/simphtml_opt.js");
         match fs::read_to_string(opt) {
             Ok(js) if cutlist && !text_only => {
-                let list_js =
-                    fs::read_to_string(self.cfg.root_dir.join("assets/simphtml_find_main_list.js"))
-                        .unwrap_or_default();
+                let list_js = fs::read_to_string(
+                    self.cfg
+                        .resource_dir
+                        .join("assets/simphtml_find_main_list.js"),
+                )
+                .unwrap_or_default();
                 format!("{js}\n{list_js}\n{}", cutlist_browser_expr(instruction))
             }
             Ok(js) => format!(
@@ -2301,7 +2310,7 @@ fn log_memory_access(cfg: &AgentConfig, path: &Path) {
         .and_then(|s| serde_json::from_str::<serde_json::Map<String, Value>>(&s).ok())
         .unwrap_or_default();
     let key = path
-        .strip_prefix(&cfg.root_dir)
+        .strip_prefix(&cfg.workspace_dir)
         .unwrap_or(path)
         .display()
         .to_string();
@@ -2325,15 +2334,17 @@ fn global_memory_prompt_for_tools(cfg: &AgentConfig) -> String {
         return String::new();
     };
     let Ok(structure) = fs::read_to_string(
-        cfg.root_dir
+        cfg.resource_dir
             .join(format!("assets/insight_fixed_structure{suffix}.txt")),
     ) else {
         return String::new();
     };
     format!(
-        "\ncwd = {} (./)\n\n[Memory] (../memory)\n{}\n../memory/global_mem_insight.txt:\n{}\n",
-        cfg.temp_dir.display(),
+        "\ncwd = {} (./)\n\n[Memory] ({})\n{}\n{}/global_mem_insight.txt:\n{}\n",
+        cfg.workspace_dir.display(),
+        cfg.memory_dir.display(),
         structure,
+        cfg.memory_dir.display(),
         insight
     )
 }
@@ -2388,10 +2399,15 @@ mod tests {
 
     fn cfg(root: &Path) -> AgentConfig {
         AgentConfig {
+            home_dir: root.into(),
+            workspace_dir: root.into(),
+            resource_dir: root.into(),
             root_dir: root.into(),
             temp_dir: root.join("temp"),
             memory_dir: root.join("memory"),
             logs_dir: root.join("logs"),
+            sessions_dir: root.join("sessions"),
+            browser_dir: root.join("browser"),
             openai_base_url: "http://x".into(),
             openai_api_key: "sk-test".into(),
             openai_model: "m".into(),
@@ -2420,7 +2436,7 @@ mod tests {
     async fn patch_requires_unique_match() {
         let d = tempdir().unwrap();
         fs::create_dir_all(d.path().join("temp")).unwrap();
-        fs::write(d.path().join("temp/a.txt"), "x\nx\n").unwrap();
+        fs::write(d.path().join("a.txt"), "x\nx\n").unwrap();
         let t = GenericToolDispatcher::new(cfg(d.path()));
         let r = t
             .dispatch(
@@ -2443,7 +2459,7 @@ mod tests {
     async fn file_patch_parity_errors_and_exact_success_shape() {
         let d = tempdir().unwrap();
         fs::create_dir_all(d.path().join("temp")).unwrap();
-        fs::write(d.path().join("temp/a.txt"), "alpha\nbeta\ngamma\n").unwrap();
+        fs::write(d.path().join("a.txt"), "alpha\nbeta\ngamma\n").unwrap();
         let t = GenericToolDispatcher::new(cfg(d.path()));
         let response = AgentResponse {
             thinking: String::new(),
@@ -2486,7 +2502,7 @@ mod tests {
             json!({"status":"success","msg":"文件局部修改成功"})
         );
         assert_eq!(
-            fs::read_to_string(d.path().join("temp/a.txt")).unwrap(),
+            fs::read_to_string(d.path().join("a.txt")).unwrap(),
             "alpha\nBETA\ngamma\n"
         );
     }
@@ -2495,7 +2511,7 @@ mod tests {
     async fn file_read_returns_lines() {
         let d = tempdir().unwrap();
         fs::create_dir_all(d.path().join("temp")).unwrap();
-        fs::write(d.path().join("temp/a.txt"), "a\nb\nc\n").unwrap();
+        fs::write(d.path().join("a.txt"), "a\nb\nc\n").unwrap();
         let t = GenericToolDispatcher::new(cfg(d.path()));
         let r = t
             .dispatch(
@@ -2521,11 +2537,13 @@ mod tests {
         fs::create_dir_all(d.path().join("temp")).unwrap();
         fs::create_dir_all(d.path().join("memory")).unwrap();
         fs::write(d.path().join("memory/plan_sop.md"), "first\nsecond\n").unwrap();
-        let t = GenericToolDispatcher::new(cfg(d.path()));
+        let cfg = cfg(d.path());
+        let memory_path = cfg.memory_dir.join("plan_sop.md");
+        let t = GenericToolDispatcher::new(cfg);
         let r = t
             .dispatch(
                 "file_read",
-                json!({"path":"../memory/plan_sop.md","show_linenos":false,"count":1}),
+                json!({"path":memory_path.display().to_string(),"show_linenos":false,"count":1}),
                 &AgentResponse {
                     thinking: String::new(),
                     content: String::new(),
@@ -2545,7 +2563,7 @@ mod tests {
     async fn file_read_keyword_falls_back_to_content() {
         let d = tempdir().unwrap();
         fs::create_dir_all(d.path().join("temp")).unwrap();
-        fs::write(d.path().join("temp/a.txt"), "a\nb\nc\n").unwrap();
+        fs::write(d.path().join("a.txt"), "a\nb\nc\n").unwrap();
         let t = GenericToolDispatcher::new(cfg(d.path()));
         let r = t
             .dispatch(
@@ -2570,7 +2588,7 @@ mod tests {
     async fn file_write_supports_prepend_and_reports_bytes() {
         let d = tempdir().unwrap();
         fs::create_dir_all(d.path().join("temp")).unwrap();
-        fs::write(d.path().join("temp/a.txt"), "tail").unwrap();
+        fs::write(d.path().join("a.txt"), "tail").unwrap();
         let t = GenericToolDispatcher::new(cfg(d.path()));
         let r = t
             .dispatch(
@@ -2589,7 +2607,7 @@ mod tests {
         assert_eq!(r.data["status"], "success");
         assert_eq!(r.data["writed_bytes"], "头".len());
         assert_eq!(
-            fs::read_to_string(d.path().join("temp/a.txt")).unwrap(),
+            fs::read_to_string(d.path().join("a.txt")).unwrap(),
             "头tail"
         );
     }
@@ -2610,10 +2628,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.data["status"], "success");
-        assert_eq!(
-            fs::read_to_string(d.path().join("temp/a.txt")).unwrap(),
-            "hello"
-        );
+        assert_eq!(fs::read_to_string(d.path().join("a.txt")).unwrap(), "hello");
         let blank = t
             .dispatch(
                 "file_write",
@@ -3215,7 +3230,7 @@ PY"}),
     fn web_execute_js_reads_script_path() {
         let d = tempdir().unwrap();
         fs::create_dir_all(d.path().join("temp")).unwrap();
-        fs::write(d.path().join("temp/script.js"), "return 42").unwrap();
+        fs::write(d.path().join("script.js"), "return 42").unwrap();
         let t = GenericToolDispatcher::new(cfg(d.path()));
         let response = AgentResponse {
             thinking: String::new(),
@@ -3242,8 +3257,8 @@ PY"}),
     #[tokio::test]
     async fn file_read_not_found_suggests_similar_file() {
         let d = tempdir().unwrap();
-        fs::create_dir_all(d.path().join("temp/src")).unwrap();
-        fs::write(d.path().join("temp/src/matrix_intro.html"), "ok").unwrap();
+        fs::create_dir_all(d.path().join("src")).unwrap();
+        fs::write(d.path().join("src/matrix_intro.html"), "ok").unwrap();
         let t = GenericToolDispatcher::new(cfg(d.path()));
         let r = t
             .dispatch(

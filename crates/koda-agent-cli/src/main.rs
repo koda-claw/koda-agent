@@ -9,11 +9,12 @@ use crossterm::{
     terminal::{Clear, ClearType},
 };
 use koda_agent_core::{
-    AgentConfig, AgentEvent, AgentRuntime,
+    AgentConfig, AgentEvent, AgentPathOptions, AgentRuntime,
     python_runtime::{
         PythonExtra, PythonPurpose, bootstrap_managed_python, doctor_python,
         python_unavailable_message, remove_managed_python, resolve_python,
     },
+    resolve_agent_paths_with_options,
 };
 use koda_agent_frontends::{run_frontend, serve_acp_jsonl_with_factory};
 use koda_agent_llm::OpenAiClient;
@@ -29,7 +30,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command as StdCommand, Stdio},
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::{sleep, timeout};
 
@@ -40,6 +41,18 @@ use tokio::time::{sleep, timeout};
     about = "Rust GenericAgent-compatible runtime"
 )]
 struct Args {
+    #[arg(long, help = "Override Koda home directory; defaults to ~/.koda-agent")]
+    home: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Override workspace directory for file tools; defaults to cwd"
+    )]
+    workspace: Option<PathBuf>,
+    #[arg(
+        long = "resource-dir",
+        help = "Override packaged/source resource directory"
+    )]
+    resource_dir: Option<PathBuf>,
     #[arg(long, help = "One-shot task directory name under temp/")]
     task: Option<String>,
     #[arg(long, help = "Prompt text for one-shot execution")]
@@ -96,6 +109,10 @@ enum CliCommand {
         #[command(subcommand)]
         command: PythonEnvCommand,
     },
+    Resources {
+        #[command(subcommand)]
+        command: ResourceCommand,
+    },
     Tui {
         #[arg(long, hide = true, conflicts_with = "line")]
         full: bool,
@@ -115,6 +132,22 @@ enum CliCommand {
 #[derive(Subcommand, Debug)]
 enum PythonEnvCommand {
     Remove,
+}
+
+#[derive(Subcommand, Debug)]
+enum ResourceCommand {
+    Install {
+        #[arg(long, help = "Resource source root; defaults to resolved resource_dir")]
+        source: Option<PathBuf>,
+        #[arg(long, help = "Overwrite existing resource files")]
+        repair: bool,
+        #[arg(long, help = "Show planned resource copies without changing files")]
+        dry_run: bool,
+    },
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -151,8 +184,14 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("warn").init();
     let args = Args::parse();
     let root = std::env::current_dir()?;
+    let path_options = AgentPathOptions {
+        home_dir: args.home.clone(),
+        workspace_dir: args.workspace.clone(),
+        resource_dir: args.resource_dir.clone(),
+        executable_dir: current_exe_dir(),
+    };
     if let Some(CliCommand::Doctor { json }) = &args.command {
-        return run_doctor(&root, *json);
+        return run_doctor(&root, path_options, *json);
     }
     if let Some(CliCommand::BootstrapPython {
         extras,
@@ -162,12 +201,23 @@ async fn main() -> Result<()> {
         offline,
     }) = &args.command
     {
-        return run_bootstrap_python(&root, extras, *recreate, *repair, *dry_run, *offline);
+        let paths = resolve_agent_paths_with_options(&root, path_options);
+        return run_bootstrap_python(
+            &paths.resource_dir,
+            extras,
+            *recreate,
+            *repair,
+            *dry_run,
+            *offline,
+        );
     }
     if let Some(CliCommand::PythonEnv { command }) = &args.command {
         return run_python_env(command);
     }
-    let mut cfg = AgentConfig::from_env(root)?;
+    if let Some(CliCommand::Resources { command }) = &args.command {
+        return run_resources(&root, path_options, command);
+    }
+    let mut cfg = AgentConfig::from_env_with_path_options(root, path_options)?;
     if args.verbose {
         cfg.verbose = true;
     }
@@ -187,6 +237,7 @@ async fn main() -> Result<()> {
             unreachable!("bootstrap-python handled before config load")
         }
         Some(CliCommand::PythonEnv { .. }) => unreachable!("python-env handled before config load"),
+        Some(CliCommand::Resources { .. }) => unreachable!("resources handled before config load"),
         Some(CliCommand::Memory {
             command: MemoryCommand::Settle { assisted },
         }) => {
@@ -263,7 +314,7 @@ async fn main() -> Result<()> {
 }
 
 async fn spawn_task_background(cfg: &AgentConfig, task: &str) -> Result<()> {
-    let dir = cfg.temp_dir.join(task);
+    let dir = task_dir(cfg, task);
     fs::create_dir_all(&dir)?;
     let stdout = fs::OpenOptions::new()
         .create(true)
@@ -275,7 +326,7 @@ async fn spawn_task_background(cfg: &AgentConfig, task: &str) -> Result<()> {
         .open(dir.join("stderr.log"))?;
     let exe = env::current_exe()?;
     let mut child = StdCommand::new(exe);
-    child.current_dir(&cfg.root_dir);
+    child.current_dir(&cfg.workspace_dir);
     for arg in env::args_os().skip(1) {
         child.arg(arg);
     }
@@ -288,40 +339,64 @@ async fn spawn_task_background(cfg: &AgentConfig, task: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_doctor(root: &Path, json_output: bool) -> Result<()> {
+fn current_exe_dir() -> Option<PathBuf> {
+    env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+}
+
+fn run_doctor(root: &Path, path_options: AgentPathOptions, json_output: bool) -> Result<()> {
+    let paths = resolve_agent_paths_with_options(root, path_options.clone());
     let env_path = root.join(".env");
-    let python = doctor_python(root, PythonPurpose::AgentHelper);
-    let llm = AgentConfig::from_env(root).ok().map(|cfg| {
-        serde_json::json!({
-            "model": cfg.openai_model,
-            "api_style": cfg.llm_api_style,
-            "stream": cfg.stream,
-            "timeout_secs": cfg.timeout_secs,
-            "connect_timeout_secs": cfg.connect_timeout_secs,
-        })
-    });
+    let home_env_path = paths.home_dir.join(".env");
+    let resource_env_path = paths.resource_dir.join(".env");
+    let python = doctor_python(&paths.home_dir, PythonPurpose::AgentHelper);
+    let llm = AgentConfig::from_env_with_path_options(root.to_path_buf(), path_options)
+        .ok()
+        .map(|cfg| {
+            serde_json::json!({
+                "model": cfg.openai_model,
+                "api_style": cfg.llm_api_style,
+                "stream": cfg.stream,
+                "timeout_secs": cfg.timeout_secs,
+                "connect_timeout_secs": cfg.connect_timeout_secs,
+            })
+        });
     let report = serde_json::json!({
         "core": {
-            "workspace": root.display().to_string(),
-            "env_file": env_path.exists(),
+            "home_dir": paths.home_dir.display().to_string(),
+            "workspace_dir": paths.workspace_dir.display().to_string(),
+            "resource_dir": paths.resource_dir.display().to_string(),
+            "temp_dir": paths.temp_dir.display().to_string(),
+            "memory_dir": paths.memory_dir.display().to_string(),
+            "logs_dir": paths.logs_dir.display().to_string(),
+            "sessions_dir": paths.sessions_dir.display().to_string(),
+            "browser_dir": paths.browser_dir.display().to_string(),
+            "env_file": env_path.exists() || home_env_path.exists() || resource_env_path.exists(),
             "env_keys": {
-                "OPENAI_BASE_URL": env_key_available(&env_path, "OPENAI_BASE_URL"),
-                "OPENAI_API_KEY": env_key_available(&env_path, "OPENAI_API_KEY"),
-                "OPENAI_MODEL": env_key_available(&env_path, "OPENAI_MODEL"),
-                "OPENAI_STREAM": env_key_available(&env_path, "OPENAI_STREAM"),
+                "OPENAI_BASE_URL": env_key_available_any(&[&env_path, &home_env_path, &resource_env_path], "OPENAI_BASE_URL"),
+                "OPENAI_API_KEY": env_key_available_any(&[&env_path, &home_env_path, &resource_env_path], "OPENAI_API_KEY"),
+                "OPENAI_MODEL": env_key_available_any(&[&env_path, &home_env_path, &resource_env_path], "OPENAI_MODEL"),
+                "OPENAI_STREAM": env_key_available_any(&[&env_path, &home_env_path, &resource_env_path], "OPENAI_STREAM"),
             }
         },
         "llm": llm,
         "python": python,
+        "resources": resource_doctor_report(&paths.resource_dir, &paths.home_dir),
     });
     if json_output {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!("Core");
-        println!("  workspace: {}", root.display());
+        println!("  home: {}", paths.home_dir.display());
+        println!("  workspace: {}", paths.workspace_dir.display());
+        println!("  resources: {}", paths.resource_dir.display());
+        println!("  temp: {}", paths.temp_dir.display());
+        println!("  memory: {}", paths.memory_dir.display());
+        println!("  logs: {}", paths.logs_dir.display());
         println!(
             "  .env: {}",
-            if env_path.exists() {
+            if env_path.exists() || home_env_path.exists() || resource_env_path.exists() {
                 "found"
             } else {
                 "missing"
@@ -372,6 +447,20 @@ fn run_doctor(root: &Path, json_output: bool) -> Result<()> {
             println!("  status: unavailable");
             println!("  fix: {}", python_unavailable_message());
         }
+        let resources = report.get("resources").unwrap();
+        let source_ok = resources
+            .get("source")
+            .and_then(|v| v.get("ok"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let home_ok = resources
+            .get("home")
+            .and_then(|v| v.get("ok"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        println!("\nResources");
+        println!("  source: {}", if source_ok { "ok" } else { "missing" });
+        println!("  home: {}", if home_ok { "ok" } else { "missing" });
     }
     Ok(())
 }
@@ -398,6 +487,52 @@ fn run_python_env(command: &PythonEnvCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn run_resources(
+    root: &Path,
+    path_options: AgentPathOptions,
+    command: &ResourceCommand,
+) -> Result<()> {
+    let paths = resolve_agent_paths_with_options(root, path_options);
+    match command {
+        ResourceCommand::Install {
+            source,
+            repair,
+            dry_run,
+        } => {
+            let source = source.as_deref().unwrap_or(&paths.resource_dir);
+            let report = install_resources(source, &paths.home_dir, *repair, *dry_run)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        ResourceCommand::Doctor { json } => {
+            let report = resource_doctor_report(&paths.resource_dir, &paths.home_dir);
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("Resources");
+                println!("  source: {}", paths.resource_dir.display());
+                println!("  home: {}", paths.home_dir.join("resources").display());
+                println!(
+                    "  source markers: {}",
+                    if report["source"]["ok"].as_bool().unwrap_or(false) {
+                        "ok"
+                    } else {
+                        "missing"
+                    }
+                );
+                println!(
+                    "  home markers: {}",
+                    if report["home"]["ok"].as_bool().unwrap_or(false) {
+                        "ok"
+                    } else {
+                        "missing"
+                    }
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_python_extras(values: &[String]) -> Result<Vec<PythonExtra>> {
@@ -443,6 +578,298 @@ fn env_key_available(env_path: &Path, key: &str) -> bool {
                 .find(|(k, v)| k == key && !v.trim().is_empty())
         })
         .is_some()
+}
+
+fn env_key_available_any(env_paths: &[&Path], key: &str) -> bool {
+    env::var(key).is_ok_and(|value| !value.trim().is_empty())
+        || env_paths.iter().any(|path| env_key_available(path, key))
+}
+
+fn install_resources(
+    source_root: &Path,
+    home_dir: &Path,
+    repair: bool,
+    dry_run: bool,
+) -> Result<serde_json::Value> {
+    let dest_root = home_dir.join("resources");
+    if paths_same_when_existing(source_root, &dest_root) {
+        return Ok(serde_json::json!({
+            "source": source_root.display().to_string(),
+            "home": home_dir.display().to_string(),
+            "destination": dest_root.display().to_string(),
+            "repair": repair,
+            "dry_run": dry_run,
+            "copied": [],
+            "skipped": ["source is already the home resources directory"],
+            "missing": [],
+            "doctor": resource_doctor_report(source_root, home_dir),
+        }));
+    }
+    let mut copied = Vec::new();
+    let mut skipped = Vec::new();
+    let mut missing = Vec::new();
+    for name in ["assets", "memory"] {
+        let src = source_root.join(name);
+        if src.exists() {
+            copy_resource_tree(
+                &src,
+                &dest_root.join(name),
+                &dest_root,
+                repair,
+                dry_run,
+                &mut copied,
+                &mut skipped,
+            )?;
+        } else {
+            missing.push(src.display().to_string());
+        }
+    }
+    if let Ok(entries) = fs::read_dir(source_root) {
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("requirements-python-") && name.ends_with(".txt") {
+                copy_resource_file(
+                    &entry.path(),
+                    &dest_root.join(name.as_ref()),
+                    &dest_root,
+                    repair,
+                    dry_run,
+                    &mut copied,
+                    &mut skipped,
+                )?;
+            }
+        }
+    } else {
+        missing.push(source_root.display().to_string());
+    }
+    if !dry_run {
+        fs::create_dir_all(home_dir.join("browser"))?;
+    }
+    prepare_browser_bridge(
+        &dest_root,
+        home_dir,
+        repair,
+        dry_run,
+        &mut copied,
+        &mut skipped,
+    )?;
+    Ok(serde_json::json!({
+        "source": source_root.display().to_string(),
+        "home": home_dir.display().to_string(),
+        "destination": dest_root.display().to_string(),
+        "repair": repair,
+        "dry_run": dry_run,
+        "copied": copied,
+        "skipped": skipped,
+        "missing": missing,
+        "doctor": resource_doctor_report(source_root, home_dir),
+    }))
+}
+
+fn prepare_browser_bridge(
+    resources_dir: &Path,
+    home_dir: &Path,
+    repair: bool,
+    dry_run: bool,
+    copied: &mut Vec<String>,
+    skipped: &mut Vec<String>,
+) -> Result<()> {
+    let src = resources_dir.join("assets/tmwd_cdp_bridge");
+    if !src.exists() {
+        return Ok(());
+    }
+    let dst = home_dir.join("browser/tmwd_cdp_bridge");
+    copy_resource_tree(&src, &dst, home_dir, repair, dry_run, copied, skipped)?;
+    let config = dst.join("config.js");
+    if config.exists() {
+        skipped.push("browser/tmwd_cdp_bridge/config.js".into());
+        return Ok(());
+    }
+    copied.push("browser/tmwd_cdp_bridge/config.js".into());
+    if dry_run {
+        return Ok(());
+    }
+    fs::create_dir_all(&dst)?;
+    fs::write(config, format!("const TID = '{}';\n", browser_bridge_tid()))?;
+    Ok(())
+}
+
+fn browser_bridge_tid() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    format!(
+        "__ljq_{:06x}",
+        (nanos ^ std::process::id() as u128) & 0x00ff_ffff
+    )
+}
+
+fn paths_same_when_existing(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn copy_resource_tree(
+    src: &Path,
+    dst: &Path,
+    dest_root: &Path,
+    repair: bool,
+    dry_run: bool,
+    copied: &mut Vec<String>,
+    skipped: &mut Vec<String>,
+) -> Result<()> {
+    for entry in fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if should_skip_resource(&src_path) {
+            skipped.push(src_path.display().to_string());
+            continue;
+        }
+        if file_type.is_dir() {
+            copy_resource_tree(
+                &src_path, &dst_path, dest_root, repair, dry_run, copied, skipped,
+            )?;
+        } else if file_type.is_file() {
+            copy_resource_file(
+                &src_path, &dst_path, dest_root, repair, dry_run, copied, skipped,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_resource_file(
+    src: &Path,
+    dst: &Path,
+    dest_root: &Path,
+    repair: bool,
+    dry_run: bool,
+    copied: &mut Vec<String>,
+    skipped: &mut Vec<String>,
+) -> Result<()> {
+    let rel = dst
+        .strip_prefix(dest_root)
+        .unwrap_or(dst)
+        .display()
+        .to_string();
+    if dst.exists() && !repair {
+        skipped.push(rel);
+        return Ok(());
+    }
+    copied.push(rel);
+    if dry_run {
+        return Ok(());
+    }
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(src, dst).with_context(|| format!("copy {} to {}", src.display(), dst.display()))?;
+    Ok(())
+}
+
+fn should_skip_resource(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    if matches!(
+        name,
+        "config.js"
+            | "global_mem.txt"
+            | "global_mem_insight.txt"
+            | "file_access_stats.json"
+            | "long_term_updates.jsonl"
+            | "pending_long_term_updates.md"
+            | "all_histories.txt"
+    ) || name.ends_with(".bak")
+        || name.ends_with(".zip")
+    {
+        return true;
+    }
+    if path.components().any(|c| c.as_os_str() == "memory") {
+        return !allowed_memory_resource(path, name);
+    }
+    false
+}
+
+fn allowed_memory_resource(path: &Path, name: &str) -> bool {
+    const TOP_LEVEL: &[&str] = &[
+        "adb_ui.py",
+        "autonomous_operation_sop.md",
+        "chat_html_debug_sop.md",
+        "github_contribution_sop.md",
+        "goal_mode_sop.md",
+        "keychain.py",
+        "ljqCtrl.py",
+        "ljqCtrl_sop.md",
+        "memory_cleanup_sop.md",
+        "memory_management_sop.md",
+        "ocr_utils.py",
+        "plan_sop.md",
+        "procmem_scanner.py",
+        "procmem_scanner_sop.md",
+        "scheduled_task_sop.md",
+        "subagent.md",
+        "supervisor_sop.md",
+        "tmwebdriver_sop.md",
+        "ui_detect.py",
+        "verify_sop.md",
+        "vision_api.py",
+        "vision_api.template.py",
+        "vision_sop.md",
+        "vue3_component_sop.md",
+        "web_setup_sop.md",
+    ];
+    if TOP_LEVEL.contains(&name) {
+        return true;
+    }
+    path.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str(),
+            Some("L4_raw_sessions" | "autonomous_operation_sop" | "skill_search")
+        )
+    })
+}
+
+fn resource_doctor_report(resource_dir: &Path, home_dir: &Path) -> serde_json::Value {
+    let home_resources = home_dir.join("resources");
+    serde_json::json!({
+        "source": resource_marker_report(resource_dir),
+        "home": resource_marker_report(&home_resources),
+        "browser": {
+            "extension_dir": home_dir.join("browser/tmwd_cdp_bridge").display().to_string(),
+            "installed": home_dir.join("browser/tmwd_cdp_bridge/manifest.json").is_file(),
+            "runtime_config": home_dir.join("browser/tmwd_cdp_bridge/config.js").is_file(),
+        }
+    })
+}
+
+fn resource_marker_report(dir: &Path) -> serde_json::Value {
+    let assets = dir.join("assets");
+    let memory = dir.join("memory");
+    let markers = serde_json::json!({
+        "tools_schema": assets.join("tools_schema.json").is_file(),
+        "sys_prompt": assets.join("sys_prompt.txt").is_file(),
+        "simphtml": assets.join("simphtml_opt.js").is_file(),
+        "tmwd_cdp_bridge": assets.join("tmwd_cdp_bridge/manifest.json").is_file(),
+        "memory_sop": memory.join("memory_management_sop.md").is_file(),
+        "requirements_core": dir.join("requirements-python-core.txt").is_file(),
+    });
+    let ok = markers
+        .as_object()
+        .map(|m| m.values().all(|v| v.as_bool().unwrap_or(false)))
+        .unwrap_or(false);
+    serde_json::json!({
+        "path": dir.display().to_string(),
+        "ok": ok,
+        "markers": markers,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -561,19 +988,19 @@ async fn reflect_check_once(script: &Path, cfg: &AgentConfig) -> Result<ReflectP
             Some("agent_team_worker" | "team_worker")
         )
     {
-        return reflect_check_agent_team(&cfg.root_dir, script).await;
+        return reflect_check_agent_team(&cfg.workspace_dir, script).await;
     }
     if is_native_goal_reflect(script) {
-        return reflect_check_goal(&cfg.root_dir, chrono::Local::now().timestamp());
+        return reflect_check_goal(&cfg.workspace_dir, chrono::Local::now().timestamp());
     }
     if is_native_scheduler_reflect(script) {
-        return reflect_check_scheduler(&cfg.root_dir, chrono::Local::now().naive_local());
+        return reflect_check_scheduler(&cfg.workspace_dir, chrono::Local::now().naive_local());
     }
     if script.extension().and_then(|s| s.to_str()) == Some("json") {
-        return reflect_check_json(script, &cfg.root_dir);
+        return reflect_check_json(script, &cfg.workspace_dir);
     }
     let script = script.to_path_buf();
-    let root = cfg.root_dir.clone();
+    let root = cfg.workspace_dir.clone();
     tokio::task::spawn_blocking(move || {
         let Some(pybin) = resolve_python(&root, PythonPurpose::AgentHelper) else {
             bail!(
@@ -625,7 +1052,7 @@ async fn reflect_on_done(script: &Path, cfg: &AgentConfig, result: &str) -> Resu
             Some("agent_team_worker" | "team_worker")
         )
     {
-        reflect_agent_team_on_done(&cfg.root_dir, chrono::Local::now().timestamp())?;
+        reflect_agent_team_on_done(&cfg.workspace_dir, chrono::Local::now().timestamp())?;
         return Ok(());
     }
     if is_native_goal_reflect(script)
@@ -635,7 +1062,7 @@ async fn reflect_on_done(script: &Path, cfg: &AgentConfig, result: &str) -> Resu
         )
     {
         reflect_goal_on_done(
-            &goal_state_path(&cfg.root_dir),
+            &goal_state_path(&cfg.workspace_dir),
             chrono::Local::now().timestamp(),
         )?;
         return Ok(());
@@ -647,7 +1074,7 @@ async fn reflect_on_done(script: &Path, cfg: &AgentConfig, result: &str) -> Resu
     }
     let script = script.to_path_buf();
     let result = result.to_string();
-    let root = cfg.root_dir.clone();
+    let root = cfg.workspace_dir.clone();
     tokio::task::spawn_blocking(move || {
         let Some(pybin) = resolve_python(&root, PythonPurpose::AgentHelper) else {
             bail!(
@@ -2043,7 +2470,7 @@ async fn run_task_mode(
     task: String,
     input: Option<String>,
 ) -> Result<()> {
-    let dir = cfg.temp_dir.join(&task);
+    let dir = task_dir(&cfg, &task);
     fs::create_dir_all(&dir)?;
     for entry in fs::read_dir(&dir)? {
         let path = entry?.path();
@@ -2121,6 +2548,15 @@ async fn run_task_mode(
     Ok(())
 }
 
+fn task_dir(cfg: &AgentConfig, task: &str) -> PathBuf {
+    let path = Path::new(task);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cfg.temp_dir.join(path)
+    }
+}
+
 fn consume_file(dir: &Path, name: &str) -> Result<Option<String>> {
     let path = dir.join(name);
     if !path.exists() {
@@ -2152,10 +2588,15 @@ mod tests {
 
     fn test_agent_config(root: &Path) -> AgentConfig {
         AgentConfig {
+            home_dir: root.into(),
+            workspace_dir: root.into(),
+            resource_dir: root.into(),
             root_dir: root.into(),
             temp_dir: root.join("temp"),
             memory_dir: root.join("memory"),
             logs_dir: root.join("logs"),
+            sessions_dir: root.join("sessions"),
+            browser_dir: root.join("browser"),
             openai_base_url: "http://localhost".into(),
             openai_api_key: "sk-test".into(),
             openai_model: "mock".into(),
@@ -2539,5 +2980,71 @@ mod tests {
             vec![PythonExtra::Core, PythonExtra::Ocr, PythonExtra::Automation]
         );
         assert!(parse_python_extras(&["unknown".into()]).is_err());
+    }
+
+    #[test]
+    fn task_dir_uses_home_temp_for_relative_and_keeps_absolute() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = test_agent_config(d.path());
+        assert_eq!(task_dir(&cfg, "demo"), d.path().join("temp/demo"));
+        let absolute = d.path().join("external-task");
+        assert_eq!(task_dir(&cfg, absolute.to_str().unwrap()), absolute);
+    }
+
+    #[test]
+    fn resources_install_copies_static_assets_without_runtime_config() {
+        let d = tempfile::tempdir().unwrap();
+        let source = d.path().join("source");
+        let home = d.path().join("home");
+        fs::create_dir_all(source.join("assets/tmwd_cdp_bridge")).unwrap();
+        fs::create_dir_all(source.join("memory")).unwrap();
+        fs::write(source.join("assets/tools_schema.json"), "[]").unwrap();
+        fs::write(source.join("assets/sys_prompt.txt"), "prompt").unwrap();
+        fs::write(source.join("assets/simphtml_opt.js"), "opt").unwrap();
+        fs::write(source.join("assets/tmwd_cdp_bridge/manifest.json"), "{}").unwrap();
+        fs::write(source.join("assets/tmwd_cdp_bridge/config.js"), "secret").unwrap();
+        fs::write(source.join("memory/memory_management_sop.md"), "sop").unwrap();
+        fs::write(source.join("memory/global_mem.txt"), "runtime").unwrap();
+        fs::write(source.join("requirements-python-core.txt"), "# core").unwrap();
+
+        let report = install_resources(&source, &home, false, false).unwrap();
+        assert_eq!(report["doctor"]["home"]["ok"], true);
+        assert!(home.join("resources/assets/tools_schema.json").is_file());
+        assert!(
+            home.join("resources/memory/memory_management_sop.md")
+                .is_file()
+        );
+        assert!(
+            home.join("resources/requirements-python-core.txt")
+                .is_file()
+        );
+        assert!(
+            !home
+                .join("resources/assets/tmwd_cdp_bridge/config.js")
+                .exists()
+        );
+        assert!(!home.join("resources/memory/global_mem.txt").exists());
+        assert!(home.join("browser/tmwd_cdp_bridge/manifest.json").is_file());
+        assert!(home.join("browser/tmwd_cdp_bridge/config.js").is_file());
+        assert_eq!(report["doctor"]["browser"]["installed"], true);
+        assert_eq!(report["doctor"]["browser"]["runtime_config"], true);
+    }
+
+    #[test]
+    fn resources_install_noops_when_source_is_home_resources() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home");
+        let resources = home.join("resources");
+        fs::create_dir_all(resources.join("assets")).unwrap();
+        fs::write(resources.join("assets/tools_schema.json"), "[]").unwrap();
+        let report = install_resources(&resources, &home, true, false).unwrap();
+        assert_eq!(report["copied"].as_array().unwrap().len(), 0);
+        assert!(
+            report["skipped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str().unwrap_or_default().contains("already"))
+        );
     }
 }

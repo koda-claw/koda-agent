@@ -26,6 +26,16 @@ powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -FromSource
 
 Python helpers are optional. Use `koda-agent bootstrap-python --extras core --repair` only when reflect scripts, OCR, vision helpers, or upstream Python SOPs need Python. See `docs/installation.md`, `docs/configuration.md`, `docs/security.md`, and `docs/browser-extension.md` for install, config, public-repo, and browser bridge guidance.
 
+Installed runtime data lives under `~/.koda-agent` by default. The current
+directory remains the workspace for file tools. Packaged prompts, tool schemas,
+memory SOPs, browser bridge assets, and Python requirement files are copied into
+`~/.koda-agent/resources` by the installer or via:
+
+```bash
+koda-agent resources install --repair
+koda-agent resources doctor --json
+```
+
 ## Quick start
 
 ```bash

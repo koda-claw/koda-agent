@@ -88,7 +88,7 @@ impl TuiAppState {
             },
         );
         Self {
-            root_label: cfg.root_dir.display().to_string(),
+            root_label: cfg.workspace_dir.display().to_string(),
             model_label: cfg.openai_model.clone(),
             api_mode: cfg.llm_api_style.clone(),
             stream_enabled: cfg.stream,

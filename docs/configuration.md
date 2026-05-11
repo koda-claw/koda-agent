@@ -1,8 +1,16 @@
 # Configuration
 
-Koda Agent reads configuration in this order:
+Koda Agent separates runtime home, workspace, and packaged resources:
 
-1. `.env` in the current checkout or working directory for local development.
+- `KODA_AGENT_HOME` or `--home`: runtime home, default `~/.koda-agent`.
+- `KODA_WORKSPACE` or `--workspace`: file-tool workspace, default current directory.
+- `KODA_RESOURCE_DIR` or `--resource-dir`: packaged/source resources.
+
+Koda Agent reads LLM configuration from the current directory, workspace, home,
+and resource directory. Environment variables win over file configuration.
+Supported files are:
+
+1. `.env` for local or user-global credentials.
 2. `config/llms.toml` for multi-model configuration.
 3. Legacy `mykey.json` or `mykey.py` dictionaries for GenericAgent compatibility.
 
@@ -31,3 +39,10 @@ VISION_API_KEY_HEADER=api-key
 
 Secrets are redacted in logs. Do not commit `.env`, local logs, browser runtime
 config, or memory runtime files.
+
+Useful diagnostics:
+
+```bash
+koda-agent doctor --json
+koda-agent resources doctor --json
+```

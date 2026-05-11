@@ -2602,10 +2602,15 @@ mod tests {
 
     fn cfg_with_models() -> AgentConfig {
         AgentConfig {
+            home_dir: ".".into(),
+            workspace_dir: ".".into(),
+            resource_dir: ".".into(),
             root_dir: ".".into(),
             temp_dir: "temp".into(),
             memory_dir: "memory".into(),
             logs_dir: "logs".into(),
+            sessions_dir: "sessions".into(),
+            browser_dir: "browser".into(),
             openai_base_url: "http://primary".into(),
             openai_api_key: "sk-primary".into(),
             openai_model: "primary".into(),

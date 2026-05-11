@@ -19,6 +19,10 @@ Source install from a checked-out repository:
 scripts/install.sh --from-source
 ```
 
+The installer also populates `~/.koda-agent/resources` from the checkout or
+release archive. This keeps packaged prompts, tool schemas, memory SOPs, Python
+requirements, and browser bridge assets separate from your project workspace.
+
 Install to a custom prefix:
 
 ```bash
@@ -45,8 +49,33 @@ Source install from a checked-out repository:
 powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -FromSource
 ```
 
-The default Windows prefix is `%LOCALAPPDATA%\koda-agent`, and the script adds
-its `bin` directory to the user `PATH`.
+The default Windows prefix is `%LOCALAPPDATA%\koda-agent`, runtime data lives in
+`%USERPROFILE%\.koda-agent`, and the script adds the prefix `bin` directory to
+the user `PATH`.
+
+## Runtime Home And Workspace
+
+By default Koda Agent uses:
+
+```text
+~/.koda-agent/          runtime home: config, temp, memory, logs, sessions, browser
+current directory       workspace: files read/written by tools
+~/.koda-agent/resources installed resources copied by installers
+```
+
+Override locations when needed:
+
+```bash
+koda-agent --home /path/to/home --workspace /path/to/project doctor
+KODA_AGENT_HOME=/path/to/home KODA_WORKSPACE=/path/to/project koda-agent doctor
+```
+
+Repair or inspect resources explicitly:
+
+```bash
+koda-agent resources install --repair
+koda-agent resources doctor --json
+```
 
 ## Optional Python Helpers
 
@@ -73,6 +102,11 @@ koda-agent doctor --json
 ```
 
 to inspect Python discovery, venv status, and runtime capability flags.
+
+The default managed helper venv is `~/.koda-agent/python/venv` on macOS/Linux
+and `%USERPROFILE%\.koda-agent\python\venv` on Windows. Existing legacy app-data
+venvs are still considered during discovery, but new bootstrap/remove operations
+target the Koda home venv.
 
 ## Update
 

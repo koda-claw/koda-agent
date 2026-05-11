@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo '== history suspicious path scan =='
-git log --all --name-only --pretty=format: | sort -u | rg -i '(^\.env$|^config/llms\.toml$|memory/L4_raw_sessions/(session_.*\.json|all_histories\.txt)$|(^|/)logs/|\.bak$|erp_order_query_sop\.md|assets/tmwd_cdp_bridge/config\.js$)' || true
+git log --all --name-only --pretty=format: | sort -u | rg -i '(^\.env$|^config/llms\.toml$|(^|/)\.koda-agent/|memory/L4_raw_sessions/(session_.*\.json|all_histories\.txt)$|(^|/)logs/|\.bak$|erp_order_query_sop\.md|assets/tmwd_cdp_bridge/config\.js$|browser/tmwd_cdp_bridge/config\.js$)' || true
 
 echo '== history content scan =='
 found=0

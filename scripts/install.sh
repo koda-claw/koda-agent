@@ -23,7 +23,7 @@ Options:
 
 Environment:
   KODA_AGENT_REPO, KODA_AGENT_VERSION, KODA_AGENT_PREFIX,
-  KODA_AGENT_BOOTSTRAP_PYTHON
+  KODA_AGENT_BOOTSTRAP_PYTHON, KODA_AGENT_HOME
 USAGE
 }
 
@@ -53,9 +53,20 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing required command: $1
 BIN_DIR="$PREFIX/bin"
 DATA_DIR="${KODA_AGENT_HOME:-$HOME/.koda-agent}"
 
+copy_resources() {
+  local src="$1"
+  [[ -d "$src" ]] || return 0
+  if [[ -x "$BIN_DIR/koda-agent" ]]; then
+    run "$BIN_DIR/koda-agent" resources install --source "$src" --repair
+  else
+    run koda-agent resources install --source "$src" --repair
+  fi
+}
+
 if [[ "$FROM_SOURCE" == 1 ]]; then
   need cargo
   run cargo install --path crates/koda-agent-cli --locked --root "$PREFIX" --force
+  copy_resources "$(pwd)"
 else
   need curl
   need tar
@@ -90,6 +101,7 @@ else
   fi
   run tar -xzf "$tmp/koda-agent.tar.gz" -C "$tmp"
   run install -m 0755 "$tmp/koda-agent" "$BIN_DIR/koda-agent"
+  copy_resources "$tmp/resources"
 fi
 
 run mkdir -p "$DATA_DIR" "$HOME/.config/koda-agent"

@@ -69,11 +69,16 @@ audit-history:
 
 release-dry-run:
 	$(CARGO) build -p $(PKG) --release --locked
-	mkdir -p dist
-	cp target/release/$(BIN) dist/$(BIN)
-	(cd dist && shasum -a 256 $(BIN) > SHA256SUMS)
-	dist/$(BIN) --help >/dev/null
-	dist/$(BIN) doctor --json >/dev/null
+	rm -rf dist/pkg
+	mkdir -p dist/pkg
+	cp target/release/$(BIN) dist/pkg/$(BIN)
+	dist/pkg/$(BIN) --home dist/pkg/koda-home resources install --source . --repair >/dev/null
+	cp -R dist/pkg/koda-home/resources dist/pkg/resources
+	rm -rf dist/pkg/koda-home
+	tar -C dist/pkg -czf dist/koda-agent-local.tar.gz $(BIN) resources
+	(cd dist && shasum -a 256 koda-agent-local.tar.gz > SHA256SUMS)
+	dist/pkg/$(BIN) --help >/dev/null
+	dist/pkg/$(BIN) --home dist/pkg/koda-home --resource-dir dist/pkg/resources doctor --json >/dev/null
 
 install-local:
 	scripts/install.sh --from-source

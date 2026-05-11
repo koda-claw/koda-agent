@@ -160,12 +160,140 @@ pub struct LlmUsageSummary {
     pub raw: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentPaths {
+    pub home_dir: PathBuf,
+    pub workspace_dir: PathBuf,
+    pub resource_dir: PathBuf,
+    pub temp_dir: PathBuf,
+    pub memory_dir: PathBuf,
+    pub logs_dir: PathBuf,
+    pub sessions_dir: PathBuf,
+    pub browser_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentPathOptions {
+    pub home_dir: Option<PathBuf>,
+    pub workspace_dir: Option<PathBuf>,
+    pub resource_dir: Option<PathBuf>,
+    pub executable_dir: Option<PathBuf>,
+}
+
+pub fn default_koda_home() -> PathBuf {
+    env::var_os("KODA_AGENT_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|p| p.join(".koda-agent")))
+        .unwrap_or_else(|| PathBuf::from(".koda-agent"))
+}
+
+pub fn resolve_agent_paths(current_dir: impl Into<PathBuf>) -> AgentPaths {
+    resolve_agent_paths_with_options(current_dir, AgentPathOptions::default())
+}
+
+pub fn resolve_agent_paths_with_options(
+    current_dir: impl Into<PathBuf>,
+    options: AgentPathOptions,
+) -> AgentPaths {
+    let current_dir = current_dir.into();
+    let home_dir = options
+        .home_dir
+        .or_else(|| env::var_os("KODA_AGENT_HOME").map(PathBuf::from))
+        .unwrap_or_else(default_koda_home);
+    let workspace_dir = options
+        .workspace_dir
+        .or_else(|| env::var_os("KODA_WORKSPACE").map(PathBuf::from))
+        .unwrap_or(current_dir.clone());
+    let resource_dir = options
+        .resource_dir
+        .or_else(|| env::var_os("KODA_RESOURCE_DIR").map(PathBuf::from))
+        .or_else(|| packaged_resource_dir(options.executable_dir.as_deref()))
+        .or_else(|| source_resource_dir(&current_dir))
+        .unwrap_or_else(|| home_dir.join("resources"));
+
+    AgentPaths {
+        temp_dir: home_dir.join("temp"),
+        memory_dir: home_dir.join("memory"),
+        logs_dir: home_dir.join("logs"),
+        sessions_dir: home_dir.join("sessions"),
+        browser_dir: home_dir.join("browser"),
+        home_dir,
+        workspace_dir,
+        resource_dir,
+    }
+}
+
+fn packaged_resource_dir(executable_dir: Option<&Path>) -> Option<PathBuf> {
+    executable_dir
+        .map(|dir| dir.join("resources"))
+        .filter(|dir| has_resource_markers(dir))
+}
+
+fn source_resource_dir(current_dir: &Path) -> Option<PathBuf> {
+    current_dir
+        .ancestors()
+        .find(|dir| has_source_resource_markers(dir))
+        .map(Path::to_path_buf)
+}
+
+fn has_resource_markers(dir: &Path) -> bool {
+    dir.join("assets/tools_schema.json").is_file() && dir.join("assets/sys_prompt.txt").is_file()
+}
+
+fn has_source_resource_markers(dir: &Path) -> bool {
+    dir.join("Cargo.toml").is_file() && has_resource_markers(dir)
+}
+
+fn config_search_roots(current_dir: &Path, paths: &AgentPaths) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for root in [
+        current_dir,
+        paths.workspace_dir.as_path(),
+        paths.home_dir.as_path(),
+        paths.resource_dir.as_path(),
+    ] {
+        if !roots.iter().any(|existing| existing == root) {
+            roots.push(root.to_path_buf());
+        }
+    }
+    roots
+}
+
+fn load_dotenv_files(roots: &[PathBuf]) {
+    for root in roots {
+        let _ = dotenvy::from_path(root.join(".env"));
+    }
+}
+
+fn copy_dir_missing(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_dir_missing(&src_path, &dst_path)?;
+        } else if file_type.is_file() && !dst_path.exists() {
+            fs::copy(&src_path, &dst_path).with_context(|| {
+                format!("copy {} to {}", src_path.display(), dst_path.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
+    pub home_dir: PathBuf,
+    pub workspace_dir: PathBuf,
+    pub resource_dir: PathBuf,
     pub root_dir: PathBuf,
     pub temp_dir: PathBuf,
     pub memory_dir: PathBuf,
     pub logs_dir: PathBuf,
+    pub sessions_dir: PathBuf,
+    pub browser_dir: PathBuf,
     pub openai_base_url: String,
     pub openai_api_key: String,
     pub openai_model: String,
@@ -283,13 +411,34 @@ struct LegacyMykeyConfig {
 
 impl AgentConfig {
     pub fn from_env(root_dir: impl Into<PathBuf>) -> Result<Self> {
-        let root_dir = root_dir.into();
-        let _ = dotenvy::from_path(root_dir.join(".env"));
-        let toml_cfg = fs::read_to_string(root_dir.join("config/llms.toml"))
-            .ok()
+        Self::from_env_with_path_options(root_dir, AgentPathOptions::default())
+    }
+
+    pub fn from_env_with_path_options(
+        current_dir: impl Into<PathBuf>,
+        options: AgentPathOptions,
+    ) -> Result<Self> {
+        let current_dir = current_dir.into();
+        let paths = resolve_agent_paths_with_options(&current_dir, options);
+        let config_roots = config_search_roots(&current_dir, &paths);
+        load_dotenv_files(&config_roots);
+        let toml_root = config_roots
+            .iter()
+            .find(|dir| dir.join("config/llms.toml").is_file())
+            .cloned();
+        let toml_cfg = toml_root
+            .as_ref()
+            .and_then(|root| fs::read_to_string(root.join("config/llms.toml")).ok())
             .and_then(|s| toml::from_str::<LlmToml>(&s).ok())
             .and_then(|c| c.default);
-        let legacy_cfg = load_legacy_mykey_config(&root_dir);
+        let legacy_root = config_roots
+            .iter()
+            .find(|dir| dir.join("mykey.json").is_file() || dir.join("mykey.py").is_file())
+            .cloned();
+        let legacy_cfg = legacy_root
+            .as_deref()
+            .map(load_legacy_mykey_config)
+            .unwrap_or_default();
         let openai_base_url = env::var("OPENAI_BASE_URL")
             .ok()
             .or_else(|| toml_cfg.as_ref().and_then(|c| c.base_url.clone()))
@@ -422,7 +571,9 @@ impl AgentConfig {
             .and_then(entry_headers)
             .or_else(|| legacy_cfg.default.as_ref().and_then(entry_headers))
             .unwrap_or_default();
-        let mixin = load_mixin_config(&root_dir)
+        let mixin = toml_root
+            .as_deref()
+            .and_then(load_mixin_config)
             .or(legacy_cfg.mixin)
             .unwrap_or_default();
         let primary_llm = LlmModelConfig {
@@ -449,16 +600,21 @@ impl AgentConfig {
             custom_headers: custom_headers.clone(),
         };
         let llm_configs = load_llm_model_configs(
-            &root_dir,
+            toml_root.as_deref().unwrap_or(&paths.resource_dir),
             &primary_llm,
             toml_cfg.as_ref(),
             &legacy_cfg.models,
         );
         Ok(Self {
-            temp_dir: root_dir.join("temp"),
-            memory_dir: root_dir.join("memory"),
-            logs_dir: root_dir.join("logs"),
-            root_dir,
+            home_dir: paths.home_dir,
+            workspace_dir: paths.workspace_dir,
+            root_dir: paths.resource_dir.clone(),
+            resource_dir: paths.resource_dir,
+            temp_dir: paths.temp_dir,
+            memory_dir: paths.memory_dir,
+            logs_dir: paths.logs_dir,
+            sessions_dir: paths.sessions_dir,
+            browser_dir: paths.browser_dir,
             openai_base_url,
             openai_api_key,
             openai_model,
@@ -484,9 +640,12 @@ impl AgentConfig {
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
+        fs::create_dir_all(&self.home_dir)?;
         fs::create_dir_all(&self.temp_dir)?;
         fs::create_dir_all(&self.memory_dir)?;
         fs::create_dir_all(&self.logs_dir)?;
+        fs::create_dir_all(&self.sessions_dir)?;
+        fs::create_dir_all(&self.browser_dir)?;
         if !self.memory_dir.join("global_mem.txt").exists() {
             fs::write(
                 self.memory_dir.join("global_mem.txt"),
@@ -494,7 +653,9 @@ impl AgentConfig {
             )?;
         }
         if !self.memory_dir.join("global_mem_insight.txt").exists() {
-            let template = self.root_dir.join("assets/global_mem_insight_template.txt");
+            let template = self
+                .resource_dir
+                .join("assets/global_mem_insight_template.txt");
             let content = fs::read_to_string(template).unwrap_or_default();
             fs::write(self.memory_dir.join("global_mem_insight.txt"), content)?;
         }
@@ -503,10 +664,12 @@ impl AgentConfig {
     }
 
     fn ensure_cdp_bridge_config(&self) -> Result<()> {
-        let bridge_dir = self.root_dir.join("assets/tmwd_cdp_bridge");
-        if !bridge_dir.exists() {
+        let src_bridge_dir = self.resource_dir.join("assets/tmwd_cdp_bridge");
+        if !src_bridge_dir.exists() {
             return Ok(());
         }
+        let bridge_dir = self.browser_dir.join("tmwd_cdp_bridge");
+        copy_dir_missing(&src_bridge_dir, &bridge_dir)?;
         let config = bridge_dir.join("config.js");
         if config.exists() {
             return Ok(());
@@ -1194,16 +1357,18 @@ fn global_memory_prompt(cfg: &AgentConfig) -> String {
         Err(_) => return String::new(),
     };
     let structure = match fs::read_to_string(
-        cfg.root_dir
+        cfg.resource_dir
             .join(format!("assets/insight_fixed_structure{suffix}.txt")),
     ) {
         Ok(v) => v,
         Err(_) => return String::new(),
     };
     format!(
-        "\ncwd = {} (./)\n\n[Memory] (../memory)\n{}\n../memory/global_mem_insight.txt:\n{}\n",
-        cfg.temp_dir.display(),
+        "\ncwd = {} (./)\n\n[Memory] ({})\n{}\n{}/global_mem_insight.txt:\n{}\n",
+        cfg.workspace_dir.display(),
+        cfg.memory_dir.display(),
         structure,
+        cfg.memory_dir.display(),
         insight
     )
 }
@@ -1438,8 +1603,8 @@ fn langfuse_trace_enabled(cfg: &AgentConfig) -> bool {
         .ok()
         .and_then(|v| parse_bool(&v))
         .unwrap_or(false)
-        || cfg.root_dir.join("config/langfuse.toml").exists()
-        || cfg.root_dir.join("langfuse_config.json").exists()
+        || cfg.home_dir.join("config/langfuse.toml").exists()
+        || cfg.home_dir.join("langfuse_config.json").exists()
 }
 
 fn append_langfuse_trace(
@@ -2400,8 +2565,8 @@ impl AgentRuntime {
             smart_format(&user_input.replace('\n', " "), 200, " ... ")
         ));
         let mut out = String::new();
-        let tools_schema = load_tool_schema(&self.cfg.root_dir, "")?;
-        let mut sys = system_prompt(&self.cfg.root_dir)?;
+        let tools_schema = load_tool_schema(&self.cfg.resource_dir, "")?;
+        let mut sys = system_prompt(&self.cfg.resource_dir)?;
         let (extra_sys, peer_hint) = {
             let overrides = self.session_overrides.lock();
             (
@@ -2714,6 +2879,129 @@ fn fold_earlier_history(lines: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_resource_markers(dir: &Path) {
+        fs::create_dir_all(dir.join("assets")).unwrap();
+        fs::write(dir.join("assets/tools_schema.json"), "[]").unwrap();
+        fs::write(dir.join("assets/sys_prompt.txt"), "prompt").unwrap();
+    }
+
+    #[test]
+    fn agent_paths_prefer_explicit_home_workspace_and_resources() {
+        let d = tempfile::tempdir().unwrap();
+        let current = d.path().join("cwd");
+        let home = d.path().join("home");
+        let workspace = d.path().join("workspace");
+        let resources = d.path().join("resources");
+        let paths = resolve_agent_paths_with_options(
+            &current,
+            AgentPathOptions {
+                home_dir: Some(home.clone()),
+                workspace_dir: Some(workspace.clone()),
+                resource_dir: Some(resources.clone()),
+                executable_dir: None,
+            },
+        );
+        assert_eq!(paths.home_dir, home);
+        assert_eq!(paths.workspace_dir, workspace);
+        assert_eq!(paths.resource_dir, resources);
+        assert_eq!(paths.temp_dir, paths.home_dir.join("temp"));
+        assert_eq!(paths.memory_dir, paths.home_dir.join("memory"));
+        assert_eq!(paths.logs_dir, paths.home_dir.join("logs"));
+        assert_eq!(paths.sessions_dir, paths.home_dir.join("sessions"));
+        assert_eq!(paths.browser_dir, paths.home_dir.join("browser"));
+    }
+
+    #[test]
+    fn agent_paths_prefer_packaged_resources_over_source_and_home() {
+        let d = tempfile::tempdir().unwrap();
+        let source = d.path().join("source");
+        let exe = d.path().join("bin");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("Cargo.toml"), "[workspace]").unwrap();
+        write_resource_markers(&source);
+        write_resource_markers(&exe.join("resources"));
+        let paths = resolve_agent_paths_with_options(
+            &source,
+            AgentPathOptions {
+                home_dir: Some(d.path().join("home")),
+                executable_dir: Some(exe.clone()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(paths.resource_dir, exe.join("resources"));
+    }
+
+    #[test]
+    fn agent_paths_detect_source_checkout_from_subdirectory() {
+        let d = tempfile::tempdir().unwrap();
+        let source = d.path().join("source");
+        let nested = source.join("crates/koda-agent-core");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(source.join("Cargo.toml"), "[workspace]").unwrap();
+        write_resource_markers(&source);
+        let paths = resolve_agent_paths_with_options(
+            &nested,
+            AgentPathOptions {
+                home_dir: Some(d.path().join("home")),
+                ..Default::default()
+            },
+        );
+        assert_eq!(paths.workspace_dir, nested);
+        assert_eq!(paths.resource_dir, source);
+    }
+
+    #[test]
+    fn agent_paths_fall_back_to_home_resources() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home");
+        let paths = resolve_agent_paths_with_options(
+            d.path().join("plain-workspace"),
+            AgentPathOptions {
+                home_dir: Some(home.clone()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(paths.resource_dir, home.join("resources"));
+    }
+
+    #[test]
+    fn agent_config_from_env_separates_home_workspace_and_resources() {
+        let d = tempfile::tempdir().unwrap();
+        let current = d.path().join("current");
+        let home = d.path().join("home");
+        let workspace = d.path().join("workspace");
+        let resources = d.path().join("resources");
+        fs::create_dir_all(home.join("config")).unwrap();
+        fs::write(
+            home.join("config/llms.toml"),
+            r#"
+[default]
+base_url = "http://example.invalid/v1"
+api_key = "sk-test"
+model = "test-model"
+"#,
+        )
+        .unwrap();
+        let cfg = AgentConfig::from_env_with_path_options(
+            &current,
+            AgentPathOptions {
+                home_dir: Some(home.clone()),
+                workspace_dir: Some(workspace.clone()),
+                resource_dir: Some(resources.clone()),
+                executable_dir: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(cfg.home_dir, home);
+        assert_eq!(cfg.workspace_dir, workspace);
+        assert_eq!(cfg.resource_dir, resources);
+        assert_eq!(cfg.root_dir, cfg.resource_dir);
+        assert_eq!(cfg.temp_dir, cfg.home_dir.join("temp"));
+        assert_eq!(cfg.memory_dir, cfg.home_dir.join("memory"));
+        assert_eq!(cfg.logs_dir, cfg.home_dir.join("logs"));
+    }
+
     #[test]
     fn url_building_matches_openai_compat() {
         assert_eq!(
@@ -2761,10 +3049,15 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         fs::create_dir_all(d.path().join("assets/tmwd_cdp_bridge")).unwrap();
         let cfg = AgentConfig {
+            home_dir: d.path().into(),
+            workspace_dir: d.path().into(),
+            resource_dir: d.path().into(),
             root_dir: d.path().into(),
             temp_dir: d.path().join("temp"),
             memory_dir: d.path().join("memory"),
             logs_dir: d.path().join("logs"),
+            sessions_dir: d.path().join("sessions"),
+            browser_dir: d.path().join("browser"),
             openai_base_url: "http://x".into(),
             openai_api_key: "sk-test".into(),
             openai_model: "m".into(),
@@ -2788,18 +3081,25 @@ mod tests {
             llm_configs: vec![],
         };
         cfg.ensure_dirs().unwrap();
-        let config = fs::read_to_string(d.path().join("assets/tmwd_cdp_bridge/config.js")).unwrap();
+        let config =
+            fs::read_to_string(d.path().join("browser/tmwd_cdp_bridge/config.js")).unwrap();
         assert!(config.starts_with("const TID = '__ljq_"));
+        assert!(!d.path().join("assets/tmwd_cdp_bridge/config.js").exists());
     }
 
     #[test]
     fn model_log_parser_accepts_timestamped_markers_and_l4_archives_history() {
         let d = tempfile::tempdir().unwrap();
         let cfg = AgentConfig {
+            home_dir: d.path().into(),
+            workspace_dir: d.path().into(),
+            resource_dir: d.path().into(),
             root_dir: d.path().into(),
             temp_dir: d.path().join("temp"),
             memory_dir: d.path().join("memory"),
             logs_dir: d.path().join("logs"),
+            sessions_dir: d.path().join("sessions"),
+            browser_dir: d.path().join("browser"),
             openai_base_url: "http://x".into(),
             openai_api_key: "sk-test".into(),
             openai_model: "m".into(),
@@ -2844,10 +3144,15 @@ mod tests {
     fn runtime_recall_injects_only_for_history_like_queries() {
         let d = tempfile::tempdir().unwrap();
         let cfg = AgentConfig {
+            home_dir: d.path().into(),
+            workspace_dir: d.path().into(),
+            resource_dir: d.path().into(),
             root_dir: d.path().into(),
             temp_dir: d.path().join("temp"),
             memory_dir: d.path().join("memory"),
             logs_dir: d.path().join("logs"),
+            sessions_dir: d.path().join("sessions"),
+            browser_dir: d.path().join("browser"),
             openai_base_url: "http://x".into(),
             openai_api_key: "sk-test".into(),
             openai_model: "m".into(),

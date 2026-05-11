@@ -10,16 +10,28 @@ param(
 $ErrorActionPreference = 'Stop'
 if (-not $Prefix) { $Prefix = Join-Path $env:LOCALAPPDATA 'koda-agent' }
 $BinDir = Join-Path $Prefix 'bin'
-$DataDir = if ($env:KODA_AGENT_HOME) { $env:KODA_AGENT_HOME } else { Join-Path $env:APPDATA 'koda-agent' }
+$DataDir = if ($env:KODA_AGENT_HOME) { $env:KODA_AGENT_HOME } else { Join-Path $env:USERPROFILE '.koda-agent' }
 
 function Invoke-Step {
   param([scriptblock]$Block, [string]$Text)
   if ($DryRun) { Write-Host "+ $Text" } else { & $Block }
 }
 
+function Copy-KodaResources {
+  param([string]$Source)
+  if (-not (Test-Path $Source)) { return }
+  $exe = Join-Path $BinDir 'koda-agent.exe'
+  if (Test-Path $exe) {
+    Invoke-Step { & $exe resources install --source $Source --repair } "$exe resources install --source $Source --repair"
+  } else {
+    Invoke-Step { koda-agent resources install --source $Source --repair } "koda-agent resources install --source $Source --repair"
+  }
+}
+
 if ($FromSource) {
   if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) { throw 'Missing required command: cargo' }
   Invoke-Step { cargo install --path crates/koda-agent-cli --locked --root $Prefix --force } "cargo install --path crates/koda-agent-cli --locked --root $Prefix --force"
+  Copy-KodaResources (Get-Location).Path
 } else {
   if (-not $Repo) { throw 'No release repository configured. Use -Repo OWNER/REPO, set KODA_AGENT_REPO, or pass -FromSource.' }
   $arch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
@@ -54,6 +66,7 @@ if ($FromSource) {
     }
     Expand-Archive -Path $zip -DestinationPath $tmp -Force
     Copy-Item -Force (Join-Path $tmp 'koda-agent.exe') (Join-Path $BinDir 'koda-agent.exe')
+    Copy-KodaResources (Join-Path $tmp 'resources')
     Remove-Item -Recurse -Force $tmp
   }
 }

@@ -7,6 +7,7 @@ Ignored private/runtime paths include:
 - `.env`
 - `logs/`
 - `crates/*/logs/`
+- `.koda-agent/`
 - `memory/global_mem.txt`
 - `memory/global_mem_insight.txt`
 - `memory/file_access_stats.json`
@@ -15,6 +16,7 @@ Ignored private/runtime paths include:
 - `memory/L4_raw_sessions/session_*.json`
 - `memory/erp_order_query_sop.md`
 - `assets/tmwd_cdp_bridge/config.js`
+- `~/.koda-agent/browser/tmwd_cdp_bridge/config.js`
 - `*.bak`
 
 Before pushing to a public remote, run:
