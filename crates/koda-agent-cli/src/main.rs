@@ -23,6 +23,7 @@ use koda_agent_memory::{
     settle_long_term_updates, settle_long_term_updates_assisted,
 };
 use koda_agent_tools::GenericToolDispatcher;
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -33,6 +34,8 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::{sleep, timeout};
+
+const DEFAULT_RELEASE_REPO: &str = "koda-claw/koda-agent";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -112,6 +115,36 @@ enum CliCommand {
     Resources {
         #[command(subcommand)]
         command: ResourceCommand,
+    },
+    Update {
+        #[arg(
+            long,
+            help = "GitHub repository OWNER/REPO; defaults to KODA_AGENT_REPO or koda-claw/koda-agent"
+        )]
+        repo: Option<String>,
+        #[arg(
+            long,
+            default_value = "latest",
+            help = "Release tag to install, or latest"
+        )]
+        version: String,
+        #[arg(
+            long,
+            help = "Install prefix; defaults to the current executable prefix"
+        )]
+        prefix: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Show planned update actions without downloading or changing files"
+        )]
+        dry_run: bool,
+        #[arg(long, help = "Skip resource repair after the binary update")]
+        no_resources: bool,
+        #[arg(
+            long,
+            help = "Create/repair the managed helper Python environment after update"
+        )]
+        bootstrap_python: bool,
     },
     Tui {
         #[arg(long, hide = true, conflicts_with = "line")]
@@ -217,6 +250,29 @@ async fn main() -> Result<()> {
     if let Some(CliCommand::Resources { command }) = &args.command {
         return run_resources(&root, path_options, command);
     }
+    if let Some(CliCommand::Update {
+        repo,
+        version,
+        prefix,
+        dry_run,
+        no_resources,
+        bootstrap_python,
+    }) = &args.command
+    {
+        return run_update(
+            &root,
+            path_options,
+            UpdateRequest {
+                repo: repo.as_deref(),
+                version,
+                prefix: prefix.as_deref(),
+                dry_run: *dry_run,
+                repair_resources: !*no_resources,
+                bootstrap_python: *bootstrap_python,
+            },
+        )
+        .await;
+    }
     let mut cfg = AgentConfig::from_env_with_path_options(root, path_options)?;
     if args.verbose {
         cfg.verbose = true;
@@ -238,6 +294,7 @@ async fn main() -> Result<()> {
         }
         Some(CliCommand::PythonEnv { .. }) => unreachable!("python-env handled before config load"),
         Some(CliCommand::Resources { .. }) => unreachable!("resources handled before config load"),
+        Some(CliCommand::Update { .. }) => unreachable!("update handled before config load"),
         Some(CliCommand::Memory {
             command: MemoryCommand::Settle { assisted },
         }) => {
@@ -533,6 +590,325 @@ fn run_resources(
         }
     }
     Ok(())
+}
+
+struct UpdateRequest<'a> {
+    repo: Option<&'a str>,
+    version: &'a str,
+    prefix: Option<&'a Path>,
+    dry_run: bool,
+    repair_resources: bool,
+    bootstrap_python: bool,
+}
+
+async fn run_update(
+    root: &Path,
+    path_options: AgentPathOptions,
+    request: UpdateRequest<'_>,
+) -> Result<()> {
+    let paths = resolve_agent_paths_with_options(root, path_options);
+    let repo = request
+        .repo
+        .map(str::to_string)
+        .or_else(|| env::var("KODA_AGENT_REPO").ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_RELEASE_REPO.to_string());
+    validate_repo_slug(&repo)?;
+    let platform = current_update_platform()?;
+    let urls = release_urls(&repo, request.version, &platform);
+    let install_dir = update_install_dir(request.prefix)?;
+    let binary_name = if cfg!(windows) {
+        "koda-agent.exe"
+    } else {
+        "koda-agent"
+    };
+    let target_binary = install_dir.join(binary_name);
+    if request.dry_run {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "dry_run": true,
+                "repo": repo,
+                "version": request.version,
+                "target": platform.target,
+                "archive": platform.archive_name,
+                "download_url": urls.archive,
+                "checksum_url": urls.checksums,
+                "install_dir": install_dir.display().to_string(),
+                "binary": target_binary.display().to_string(),
+                "home": paths.home_dir.display().to_string(),
+                "repair_resources": request.repair_resources,
+                "bootstrap_python": request.bootstrap_python,
+            }))?
+        );
+        return Ok(());
+    }
+
+    fs::create_dir_all(&install_dir)
+        .with_context(|| format!("create install directory {}", install_dir.display()))?;
+    fs::create_dir_all(&paths.home_dir)
+        .with_context(|| format!("create Koda home {}", paths.home_dir.display()))?;
+    let tmp = tempfile::Builder::new()
+        .prefix("koda-agent-update-")
+        .tempdir()
+        .context("create update tempdir")?;
+    let archive_path = tmp.path().join(&platform.archive_name);
+    let archive = download_bytes(&urls.archive).await?;
+    verify_release_checksum(
+        &archive,
+        &download_text(&urls.checksums).await?,
+        &platform.archive_name,
+    )?;
+    fs::write(&archive_path, &archive)
+        .with_context(|| format!("write archive {}", archive_path.display()))?;
+    extract_release_archive(&archive_path, tmp.path(), platform.archive_kind)?;
+    let extracted_binary = tmp.path().join(binary_name);
+    if !extracted_binary.is_file() {
+        bail!(
+            "release archive did not contain expected binary {}",
+            binary_name
+        );
+    }
+    let binary_update = install_updated_binary(&extracted_binary, &target_binary)?;
+    let mut resource_report = serde_json::Value::Null;
+    if request.repair_resources {
+        let resources = tmp.path().join("resources");
+        if resources.is_dir() {
+            resource_report = install_resources(&resources, &paths.home_dir, true, false)?;
+        } else {
+            bail!("release archive did not contain resources/");
+        }
+    }
+    let mut python_report = serde_json::Value::Null;
+    if request.bootstrap_python {
+        let resource_root = paths.home_dir.join("resources");
+        python_report = serde_json::to_value(bootstrap_managed_python(
+            &resource_root,
+            &[PythonExtra::Core],
+            false,
+            true,
+            false,
+            false,
+        )?)?;
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "updated": true,
+            "repo": repo,
+            "version": request.version,
+            "target": platform.target,
+            "binary": target_binary.display().to_string(),
+            "binary_update": binary_update,
+            "resources": resource_report,
+            "python": python_report,
+        }))?
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveKind {
+    TarGz,
+    Zip,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UpdatePlatform {
+    target: String,
+    archive_name: String,
+    archive_kind: ArchiveKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReleaseUrls {
+    archive: String,
+    checksums: String,
+}
+
+fn current_update_platform() -> Result<UpdatePlatform> {
+    update_platform_for(env::consts::OS, env::consts::ARCH)
+}
+
+fn update_platform_for(os: &str, arch: &str) -> Result<UpdatePlatform> {
+    let target = match (os, arch) {
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
+        ("windows", "aarch64") => "aarch64-pc-windows-msvc",
+        _ => bail!("unsupported update platform: {os}/{arch}"),
+    };
+    let archive_kind = if os == "windows" {
+        ArchiveKind::Zip
+    } else {
+        ArchiveKind::TarGz
+    };
+    let suffix = match archive_kind {
+        ArchiveKind::TarGz => "tar.gz",
+        ArchiveKind::Zip => "zip",
+    };
+    Ok(UpdatePlatform {
+        target: target.to_string(),
+        archive_name: format!("koda-agent-{target}.{suffix}"),
+        archive_kind,
+    })
+}
+
+fn release_urls(repo: &str, version: &str, platform: &UpdatePlatform) -> ReleaseUrls {
+    let base = if version == "latest" {
+        format!("https://github.com/{repo}/releases/latest/download")
+    } else {
+        format!("https://github.com/{repo}/releases/download/{version}")
+    };
+    ReleaseUrls {
+        archive: format!("{base}/{}", platform.archive_name),
+        checksums: format!("{base}/SHA256SUMS"),
+    }
+}
+
+fn validate_repo_slug(repo: &str) -> Result<()> {
+    let valid = repo.split_once('/').is_some_and(|(owner, name)| {
+        !owner.is_empty()
+            && !name.is_empty()
+            && [owner, name].iter().all(|part| {
+                part.chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+            })
+    });
+    if !valid {
+        bail!("invalid GitHub repo slug: {repo}; expected OWNER/REPO");
+    }
+    Ok(())
+}
+
+fn update_install_dir(prefix: Option<&Path>) -> Result<PathBuf> {
+    if let Some(prefix) = prefix {
+        return Ok(prefix.join("bin"));
+    }
+    let exe = env::current_exe().context("resolve current executable")?;
+    exe.parent()
+        .map(Path::to_path_buf)
+        .context("current executable has no parent")
+}
+
+async fn download_bytes(url: &str) -> Result<Vec<u8>> {
+    let response = reqwest::get(url)
+        .await
+        .with_context(|| format!("download {url}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("download {url} failed with {status}");
+    }
+    Ok(response.bytes().await?.to_vec())
+}
+
+async fn download_text(url: &str) -> Result<String> {
+    let response = reqwest::get(url)
+        .await
+        .with_context(|| format!("download {url}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("download {url} failed with {status}");
+    }
+    Ok(response.text().await?)
+}
+
+fn verify_release_checksum(bytes: &[u8], checksums: &str, archive_name: &str) -> Result<()> {
+    let expected = checksum_for_archive(checksums, archive_name)
+        .with_context(|| format!("{archive_name} not found in SHA256SUMS"))?;
+    let actual = format!("{:x}", Sha256::digest(bytes));
+    if expected != actual {
+        bail!("checksum mismatch for {archive_name}: expected {expected}, got {actual}");
+    }
+    Ok(())
+}
+
+fn checksum_for_archive(checksums: &str, archive_name: &str) -> Option<String> {
+    checksums.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let hash = parts.next()?;
+        let file = parts.next()?.trim_start_matches('*');
+        (file == archive_name || file.ends_with(&format!("/{archive_name}")))
+            .then(|| hash.to_ascii_lowercase())
+    })
+}
+
+fn extract_release_archive(path: &Path, dest: &Path, kind: ArchiveKind) -> Result<()> {
+    match kind {
+        ArchiveKind::TarGz => {
+            let file =
+                fs::File::open(path).with_context(|| format!("open archive {}", path.display()))?;
+            let decoder = flate2::read::GzDecoder::new(file);
+            let mut archive = tar::Archive::new(decoder);
+            archive
+                .unpack(dest)
+                .with_context(|| format!("extract archive {}", path.display()))?;
+        }
+        ArchiveKind::Zip => {
+            let file =
+                fs::File::open(path).with_context(|| format!("open archive {}", path.display()))?;
+            let mut archive = zip::ZipArchive::new(file)?;
+            archive
+                .extract(dest)
+                .with_context(|| format!("extract archive {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn install_updated_binary(src: &Path, dst: &Path) -> Result<serde_json::Value> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    #[cfg(windows)]
+    {
+        let current = env::current_exe().ok().and_then(|p| p.canonicalize().ok());
+        let target = dst.canonicalize().ok();
+        if current.is_some() && current == target {
+            let pending = dst.with_extension("exe.new");
+            fs::copy(src, &pending)
+                .with_context(|| format!("copy pending binary {}", pending.display()))?;
+            let script = dst.with_file_name("koda-agent-apply-update.ps1");
+            fs::write(
+                &script,
+                format!(
+                    "$ErrorActionPreference='Stop'\nWait-Process -Id {}\nMove-Item -Force '{}' '{}'\n",
+                    std::process::id(),
+                    pending.display(),
+                    dst.display()
+                ),
+            )?;
+            StdCommand::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    &script.display().to_string(),
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .context("spawn Windows deferred updater")?;
+            return Ok(serde_json::json!({
+                "mode": "deferred_windows_replace",
+                "pending_binary": pending.display().to_string(),
+                "script": script.display().to_string(),
+            }));
+        }
+    }
+    fs::copy(src, dst).with_context(|| format!("copy {} to {}", src.display(), dst.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(dst)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(dst, perms)?;
+    }
+    Ok(serde_json::json!({ "mode": "direct_replace" }))
 }
 
 fn parse_python_extras(values: &[String]) -> Result<Vec<PythonExtra>> {
@@ -3046,5 +3422,63 @@ mod tests {
                 .iter()
                 .any(|v| v.as_str().unwrap_or_default().contains("already"))
         );
+    }
+
+    #[test]
+    fn update_platform_mapping_covers_release_targets() {
+        let cases = [
+            ("macos", "x86_64", "x86_64-apple-darwin", "tar.gz"),
+            ("macos", "aarch64", "aarch64-apple-darwin", "tar.gz"),
+            ("linux", "x86_64", "x86_64-unknown-linux-gnu", "tar.gz"),
+            ("linux", "aarch64", "aarch64-unknown-linux-gnu", "tar.gz"),
+            ("windows", "x86_64", "x86_64-pc-windows-msvc", "zip"),
+            ("windows", "aarch64", "aarch64-pc-windows-msvc", "zip"),
+        ];
+        for (os, arch, target, suffix) in cases {
+            let platform = update_platform_for(os, arch).unwrap();
+            assert_eq!(platform.target, target);
+            assert_eq!(
+                platform.archive_name,
+                format!("koda-agent-{target}.{suffix}")
+            );
+        }
+        assert!(update_platform_for("freebsd", "x86_64").is_err());
+    }
+
+    #[test]
+    fn update_release_urls_and_checksums_match_github_shape() {
+        let platform = update_platform_for("linux", "x86_64").unwrap();
+        let latest = release_urls("koda-claw/koda-agent", "latest", &platform);
+        assert_eq!(
+            latest.archive,
+            "https://github.com/koda-claw/koda-agent/releases/latest/download/koda-agent-x86_64-unknown-linux-gnu.tar.gz"
+        );
+        assert_eq!(
+            latest.checksums,
+            "https://github.com/koda-claw/koda-agent/releases/latest/download/SHA256SUMS"
+        );
+        let pinned = release_urls("koda-claw/koda-agent", "v0.1.0", &platform);
+        assert_eq!(
+            pinned.archive,
+            "https://github.com/koda-claw/koda-agent/releases/download/v0.1.0/koda-agent-x86_64-unknown-linux-gnu.tar.gz"
+        );
+        assert_eq!(
+            checksum_for_archive(
+                "abc  koda-agent-x86_64-unknown-linux-gnu.tar.gz\n",
+                "koda-agent-x86_64-unknown-linux-gnu.tar.gz"
+            )
+            .as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            checksum_for_archive(
+                "abc  dist/koda-agent-x86_64-unknown-linux-gnu.tar.gz\n",
+                "koda-agent-x86_64-unknown-linux-gnu.tar.gz"
+            )
+            .as_deref(),
+            Some("abc")
+        );
+        assert!(validate_repo_slug("koda-claw/koda-agent").is_ok());
+        assert!(validate_repo_slug("https://github.com/koda-claw/koda-agent").is_err());
     }
 }

@@ -110,13 +110,44 @@ target the Koda home venv.
 
 ## Update
 
-macOS/Linux:
+Installed users can update directly with the binary. This path is preferred
+because it works without a checked-out repository:
+
+```bash
+koda-agent update --repo koda-claw/koda-agent --version latest
+koda-agent update --repo koda-claw/koda-agent --version v0.1.0
+```
+
+`koda-agent update` detects the current platform, downloads the matching GitHub
+Release asset, verifies `SHA256SUMS`, replaces the installed binary, and repairs
+`~/.koda-agent/resources` unless `--no-resources` is passed. Supported release
+targets are:
+
+```text
+x86_64-unknown-linux-gnu
+aarch64-unknown-linux-gnu
+x86_64-apple-darwin
+aarch64-apple-darwin
+x86_64-pc-windows-msvc
+aarch64-pc-windows-msvc
+```
+
+Use `--prefix <dir>` when the binary should be installed under a specific
+prefix instead of replacing the currently running executable's directory:
+
+```bash
+koda-agent update --repo koda-claw/koda-agent --prefix ~/.local
+```
+
+The legacy script wrappers are still available and delegate to the installer.
+
+macOS/Linux script wrapper:
 
 ```bash
 scripts/update.sh --repo <owner>/<repo>
 ```
 
-Windows:
+Windows script wrapper:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/update.ps1 -Repo <owner>/<repo>

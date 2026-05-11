@@ -24,6 +24,18 @@ Windows PowerShell:
 powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -FromSource
 ```
 
+After installation, update directly from GitHub Releases without keeping a
+checkout:
+
+```bash
+koda-agent update --repo koda-claw/koda-agent --version latest
+koda-agent update --repo koda-claw/koda-agent --version v0.1.0
+```
+
+The updater selects the current platform asset and currently supports
+Linux/macOS/Windows on amd64 and arm64. It verifies `SHA256SUMS`, replaces the
+installed binary, and repairs `~/.koda-agent/resources` by default.
+
 Python helpers are optional. Use `koda-agent bootstrap-python --extras core --repair` only when reflect scripts, OCR, vision helpers, or upstream Python SOPs need Python. See `docs/installation.md`, `docs/configuration.md`, `docs/security.md`, and `docs/browser-extension.md` for install, config, public-repo, and browser bridge guidance.
 
 Installed runtime data lives under `~/.koda-agent` by default. The current
@@ -48,6 +60,7 @@ cargo run -p koda-agent-cli -- frontend tmwebdriver
 cargo run -p koda-agent-cli -- memory settle
 cargo run -p koda-agent-cli -- memory settle --assisted
 cargo run -p koda-agent-cli -- memory l4-archive --run
+cargo run -p koda-agent-cli -- update --dry-run
 ```
 
 Configuration is read from `.env` (`OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`) and optional `config/llms.toml`. If TOML is absent, simple upstream-style `mykey.json` or `mykey.py` dict assignments are imported as a compatibility fallback. Set `OPENAI_API_STYLE=responses` to use the OpenAI Responses API wire shape, or `OPENAI_API_STYLE=claude` for Anthropic `/v1/messages`. Secrets are redacted in logs.
