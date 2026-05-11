@@ -1748,11 +1748,9 @@ fn run_config_migrate(
     let model = env_value_available_any(&env_paths, "OPENAI_MODEL")
         .filter(|v| !v.trim().is_empty())
         .context("OPENAI_MODEL missing; run `koda-agent config setup mimo` instead")?;
-    let key_found =
-        env_value_available_any(&env_paths, "OPENAI_API_KEY").is_some_and(|v| !v.trim().is_empty());
-    if !key_found {
-        bail!("OPENAI_API_KEY missing; add it to .env before migrate");
-    }
+    let api_key_value = env_value_available_any(&env_paths, "OPENAI_API_KEY")
+        .filter(|v| !v.trim().is_empty())
+        .context("OPENAI_API_KEY missing; add it to .env before migrate")?;
     let api_style = env_value_available_any(&env_paths, "OPENAI_API_STYLE")
         .unwrap_or_else(|| "chat".into())
         .to_ascii_lowercase();
@@ -1810,6 +1808,7 @@ fn run_config_migrate(
     if !dry_run {
         let mut updates = BTreeMap::new();
         updates.insert("KODA_LLM_PROFILE".to_string(), profile.name.clone());
+        updates.insert("OPENAI_API_KEY".to_string(), api_key_value);
         upsert_env_file(&config_env_path(paths), &updates)?;
         secure_env_file_permissions(&config_env_path(paths))?;
     }
@@ -5659,7 +5658,7 @@ api_mode = "chat_completions"
     }
 
     #[test]
-    fn config_migrate_imports_legacy_openai_without_copying_key() {
+    fn config_migrate_imports_legacy_openai_and_copies_key_to_home_env() {
         let d = tempfile::tempdir().unwrap();
         let root = d.path().join("workspace");
         let home = d.path().join("home");
@@ -5686,6 +5685,7 @@ api_mode = "chat_completions"
         assert!(llms.contains("api_mode = \"responses\""));
         assert!(!llms.contains("sk-legacy"));
         assert!(env_text.contains("KODA_LLM_PROFILE=openai-compat"));
+        assert!(env_text.contains("OPENAI_API_KEY=sk-legacy"));
         assert!(run_config_migrate(&root, &paths, "openai-compat", false, true, true).is_err());
     }
 
