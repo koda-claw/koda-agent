@@ -13,14 +13,48 @@ binary starts and can emit `doctor --json` against the packaged resources.
 ## Pre-release gates
 
 ```bash
-make audit-secrets
-make audit-history
 cargo fmt --all --check
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+make audit-secrets
+make audit-history
+make release-dry-run
+```
+
+## Local install acceptance
+
+Run this before committing and tagging so the installed CLI path is verified, not
+only the workspace binary:
+
+```bash
+scripts/install.sh --from-source
+koda-agent --version
+koda-agent --help
+koda-agent doctor
+koda-agent resources doctor
+koda-agent config validate
+```
+
+If a real profile is configured locally, run at least one provider smoke:
+
+```bash
+koda-agent --profile mimo --input "用一句话回复：配置验证成功"
+```
+
+Optional targeted smoke checks:
+
+```bash
 cargo run -q -p xtask -- tui-smoke
 cargo run -q -p xtask -- memory-parity-smoke
 cargo run -q -p xtask -- tmwd-static-parity-smoke
+```
+
+Check the final diff and staged set after local install acceptance:
+
+```bash
+git status --short
+git diff --stat
+git diff --cached --stat
 ```
 
 ## GitHub release artifact names

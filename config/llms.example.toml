@@ -3,15 +3,16 @@
 # Secrets should live in ~/.koda-agent/.env, not in this TOML file.
 
 [selector]
-default = "mimo"
+default_profile = "mimo"
+default_model = "pro"
 
 [defaults]
 stream = true
-timeout_secs = 600
+timeout_secs = 1200
 connect_timeout_secs = 30
 verify_tls = true
 temperature = 1.0
-max_tokens = 8192
+max_tokens = 16384
 failover = true
 
 [[profiles]]
@@ -21,9 +22,19 @@ base_url = "https://api.xiaomimimo.com/v1"
 api_key_env = "MIMO_API_KEY"
 auth_scheme = "header"
 auth_header = "api-key"
-model = "mimo-v2.5-pro"
 api_mode = "chat_completions"
 stream = true
+max_tokens = 32768
+
+[[profiles.models]]
+name = "pro"
+id = "mimo-v2.5-pro"
+max_tokens = 32768
+
+[[profiles.models]]
+name = "vision"
+id = "mimo-v2.5"
+max_tokens = 8192
 
 [[profiles]]
 name = "deepseek"
@@ -31,10 +42,25 @@ kind = "native_oai"
 base_url = "https://api.deepseek.com/v1"
 api_key_env = "DEEPSEEK_API_KEY"
 auth_scheme = "bearer"
-model = "deepseek-chat"
 api_mode = "chat_completions"
 stream = true
-reasoning_effort = "medium"
+timeout_secs = 1800
+max_tokens = 65536
+reasoning_effort = "high"
+
+[[profiles.models]]
+name = "pro"
+id = "deepseek-v4-pro"
+reasoning_effort = "max"
+max_tokens = 65536
+timeout_secs = 2400
+
+[[profiles.models]]
+name = "flash"
+id = "deepseek-v4-flash"
+reasoning_effort = "high"
+max_tokens = 32768
+timeout_secs = 1800
 
 [[profiles]]
 name = "openai"
@@ -42,10 +68,68 @@ kind = "native_oai"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 auth_scheme = "bearer"
-model = "gpt-4.1-mini"
 api_mode = "responses"
 stream = true
 reasoning_effort = "medium"
+max_tokens = 32768
+
+[[profiles.models]]
+name = "default"
+id = "gpt-5.2"
+reasoning_effort = "medium"
+max_tokens = 32768
+
+[[profiles.models]]
+name = "pro"
+id = "gpt-5.2-pro"
+reasoning_effort = "high"
+max_tokens = 65536
+timeout_secs = 2400
+
+[[profiles.models]]
+name = "mini"
+id = "gpt-5-mini"
+reasoning_effort = "low"
+max_tokens = 16384
+
+[[profiles.models]]
+name = "codex"
+id = "gpt-5.2-codex"
+reasoning_effort = "high"
+max_tokens = 65536
+timeout_secs = 2400
+
+[[profiles]]
+name = "glm"
+kind = "native_oai"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+api_key_env = "ZHIPUAI_API_KEY"
+auth_scheme = "bearer"
+api_mode = "chat_completions"
+stream = true
+timeout_secs = 1800
+max_tokens = 32768
+thinking_type = "enabled"
+
+[[profiles.models]]
+name = "default"
+id = "glm-5.1"
+max_tokens = 65536
+timeout_secs = 2400
+thinking_type = "enabled"
+
+[[profiles.models]]
+name = "stable"
+id = "glm-4.7"
+max_tokens = 65536
+timeout_secs = 2400
+thinking_type = "enabled"
+
+[[profiles.models]]
+name = "flash"
+id = "glm-4.5-flash"
+max_tokens = 16384
+thinking_type = "disabled"
 
 [[profiles]]
 name = "claude"
@@ -53,9 +137,12 @@ kind = "native_claude"
 base_url = "https://api.anthropic.com/v1"
 api_key_env = "ANTHROPIC_API_KEY"
 auth_scheme = "x-api-key"
-model = "claude-3-5-sonnet-latest"
 stream = true
 thinking_type = "adaptive"
+
+[[profiles.models]]
+name = "sonnet"
+id = "claude-3-5-sonnet-latest"
 
 [[profiles]]
 name = "openrouter"
@@ -63,7 +150,6 @@ kind = "native_oai"
 base_url = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
 auth_scheme = "bearer"
-model = "anthropic/claude-3.5-sonnet"
 api_mode = "chat_completions"
 stream = true
 
@@ -71,8 +157,12 @@ stream = true
 HTTP-Referer = "https://koda-agent.local"
 X-Title = "Koda Agent"
 
+[[profiles.models]]
+name = "sonnet"
+id = "anthropic/claude-3.5-sonnet"
+
 [mixin]
-llm_nos = ["mimo", "deepseek", "openai"]
+llm_nos = ["mimo:pro", "deepseek:pro", "openai:default", "glm:default"]
 max_retries = 3
 base_delay = 1.5
 spring_back = 300

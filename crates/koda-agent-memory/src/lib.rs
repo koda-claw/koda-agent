@@ -907,8 +907,7 @@ async fn assisted_memory_update(
 }
 
 fn build_assisted_settlement_prompt(cfg: &AgentConfig, entry: &Value, reason: &str) -> String {
-    let l0 =
-        fs::read_to_string(cfg.memory_dir.join("memory_management_sop.md")).unwrap_or_default();
+    let l0 = read_memory_or_resource(cfg, "memory_management_sop.md").unwrap_or_default();
     let l1 = fs::read_to_string(cfg.memory_dir.join("global_mem_insight.txt")).unwrap_or_default();
     let l2 = fs::read_to_string(cfg.memory_dir.join("global_mem.txt")).unwrap_or_default();
     format!(
@@ -925,6 +924,12 @@ Rules: no passwords, no API keys, no volatile timestamps, no guesses, omit empty
         truncate_for_prompt(&l1, 2000),
         truncate_for_prompt(&l2, 6000),
     )
+}
+
+fn read_memory_or_resource(cfg: &AgentConfig, name: &str) -> Option<String> {
+    fs::read_to_string(cfg.memory_dir.join(name))
+        .or_else(|_| fs::read_to_string(cfg.resource_dir.join("memory").join(name)))
+        .ok()
 }
 
 fn parse_assisted_settlement_response(content: &str) -> Option<Value> {

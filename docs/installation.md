@@ -24,7 +24,8 @@ release archive. This keeps packaged prompts, tool schemas, memory SOPs, Python
 requirements, and browser bridge assets separate from your project workspace.
 It also runs `koda-agent init`: if the current directory has a complete `.env`,
 that file is copied into `~/.koda-agent/.env`; otherwise a local template is
-created there for you to fill in. The LLM config example is also installed as
+created there for you to fill in. `init` creates the active runtime config at
+`~/.koda-agent/config/llms.toml` and keeps the full provider template at
 `~/.koda-agent/config/llms.example.toml`.
 
 Install to a custom prefix:
@@ -64,7 +65,7 @@ By default Koda Agent uses:
 ```text
 ~/.koda-agent/          runtime home: config, temp, memory, logs, sessions, browser
 current directory       workspace: files read/written by tools
-~/.koda-agent/resources installed resources copied by installers
+~/.koda-agent/resources installed resources copied by init/installers
 ```
 
 Override locations when needed:
@@ -85,14 +86,23 @@ koda-agent config secret MIMO_API_KEY --from-stdin
 koda-agent config validate
 ```
 
+`koda-agent init` is intentionally safe: it creates a default `mimo:pro` LLM in
+`llms.toml` with an empty `MIMO_API_KEY`, or, when it copies a legacy
+`OPENAI_*` `.env`, creates an `openai-compat:default` LLM without writing the key to
+TOML. It also copies packaged/source resources into `~/.koda-agent/resources`
+when available, without copying runtime files such as `.env`, `config.js`,
+`llms.toml`, memory logs, or L4 session dumps. Use `config setup`,
+`config secret`, or `config migrate --force` to refine the selected provider.
+
 Runtime configuration lookup checks the current directory, the explicit
 workspace, `~/.koda-agent/.env`, installed resources, and the platform config
 directory such as `~/.config/koda-agent/.env`. Secrets are never printed by
 `doctor` or `init`.
 
-Use `config/llms.toml` for optional multi-model, failover, Claude Messages API,
-Responses API, timeout, proxy, and reasoning/thinking settings. Keep real
-secrets in `.env` unless you intentionally want TOML-only model profiles.
+Use `~/.koda-agent/config/llms.toml` for provider profiles, per-profile model aliases, multi-model
+failover, Claude Messages API, Responses API, timeout, proxy, and
+reasoning/thinking settings. Keep real secrets in `.env`; `llms.example.toml` is
+only a template/reference file.
 
 Repair or inspect resources explicitly:
 

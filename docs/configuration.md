@@ -12,9 +12,16 @@ The product direction is `llms.toml` first:
 
 ```text
 ~/.koda-agent/config/llms.toml       # model/provider profiles
-~/.koda-agent/config/llms.example.toml
-~/.koda-agent/.env                   # secrets and KODA_LLM_PROFILE
+~/.koda-agent/config/llms.example.toml # template/reference only
+~/.koda-agent/.env                   # secrets, KODA_LLM_PROFILE, KODA_LLM_MODEL
 ```
+
+`koda-agent init` creates both files on a clean home: `llms.toml` is the active
+runtime config, while `llms.example.toml` is kept as a richer template. It also
+installs static resources into `~/.koda-agent/resources` from the resolved
+resource source when available. If `init` copies a legacy `.env` with
+`OPENAI_BASE_URL` and `OPENAI_MODEL`, it creates an `openai-compat` profile and
+keeps `OPENAI_API_KEY` in `.env`.
 
 The normal user path is CLI setup, not manual editing:
 
@@ -25,7 +32,7 @@ koda-agent config validate
 koda-agent tui --full
 ```
 
-`config setup` writes profile definitions to `llms.toml` and stores API keys in
+`config setup` writes provider profiles and model aliases to `llms.toml` and stores API keys in
 `.env`. Real keys are not written into TOML by default.
 
 Useful commands:
@@ -38,7 +45,13 @@ koda-agent config setup mimo --from-env --yes
 koda-agent config setup deepseek --api-key-env DEEPSEEK_API_KEY --yes
 koda-agent config use deepseek
 koda-agent config secret DEEPSEEK_API_KEY --from-stdin
-koda-agent config set deepseek model deepseek-reasoner
+koda-agent config model list deepseek
+koda-agent config model use deepseek flash
+koda-agent config model remove deepseek flash --force
+koda-agent --profile deepseek --model flash --input "hi"
+koda-agent --llm deepseek:flash --input "hi"
+koda-agent config setup glm --api-key-env ZHIPUAI_API_KEY --yes
+koda-agent --llm glm:default --input "hi"
 koda-agent config remove deepseek
 koda-agent config migrate
 koda-agent config validate --json
@@ -55,6 +68,7 @@ Example `.env`:
 
 ```bash
 KODA_LLM_PROFILE=mimo
+KODA_LLM_MODEL=pro
 MIMO_API_KEY=...
 ```
 
@@ -62,7 +76,8 @@ Example `llms.toml`:
 
 ```toml
 [selector]
-default = "mimo"
+default_profile = "mimo"
+default_model = "pro"
 
 [[profiles]]
 name = "mimo"
@@ -71,14 +86,15 @@ base_url = "https://api.xiaomimimo.com/v1"
 api_key_env = "MIMO_API_KEY"
 auth_scheme = "header"
 auth_header = "api-key"
-model = "mimo-v2.5-pro"
 api_mode = "chat_completions"
 stream = true
+
+[[profiles.models]]
+name = "pro"
+id = "mimo-v2.5-pro"
 ```
 
-Legacy `OPENAI_BASE_URL` / `OPENAI_MODEL` runtime fallback is being removed in
-favor of `llms.toml`. Use the migration/setup flow instead of relying on those
-variables as primary config.
+Legacy `OPENAI_BASE_URL` / `OPENAI_MODEL` values are migration inputs. New runtime config uses `llms.toml` with `[[profiles.models]]`; profile-level `model = "..."` is rejected with a migration hint.
 
 ## Vision Helpers
 

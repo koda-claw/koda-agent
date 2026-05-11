@@ -283,7 +283,10 @@ fn resolve_mixin_order(
             let idx = selector.parse::<usize>().ok().or_else(|| {
                 names.iter().enumerate().find_map(|(idx, name)| {
                     let model = &clients[idx].cfg.openai_model;
-                    (name == selector || model == selector || clients[idx].name() == selector)
+                    (name == selector
+                        || (!selector.contains(':') && name.starts_with(&format!("{selector}:")))
+                        || model == selector
+                        || clients[idx].name() == selector)
                         .then_some(idx)
                 })
             });
@@ -1071,12 +1074,24 @@ fn apply_common_openai_options(payload: &mut Value, cfg: &AgentConfig, responses
             obj.insert("reasoning_effort".into(), json!(effort));
         }
     }
+    if !responses
+        && supports_openai_compatible_thinking(cfg)
+        && let Some(thinking_type) = cfg.thinking_type.as_deref()
+    {
+        obj.insert("thinking".into(), json!({"type": thinking_type}));
+    }
     if let Some(tier) = &cfg.service_tier {
         obj.insert("service_tier".into(), json!(tier));
     }
     if cfg.stream && !responses {
         obj.insert("stream_options".into(), json!({"include_usage": true}));
     }
+}
+
+fn supports_openai_compatible_thinking(cfg: &AgentConfig) -> bool {
+    let model = cfg.openai_model.to_ascii_lowercase();
+    let base_url = cfg.openai_base_url.to_ascii_lowercase();
+    model.starts_with("glm-") || base_url.contains("bigmodel.cn") || base_url.contains("z.ai")
 }
 
 fn normalize_temperature(temp: f64, model: &str) -> f64 {
@@ -2561,6 +2576,22 @@ mod tests {
         let mut payload = json!({});
         apply_claude_options(&mut payload, &cfg);
         assert!(payload.get("thinking").is_none());
+    }
+
+    #[test]
+    fn glm_openai_compatible_thinking_option_matches_bigmodel_shape() {
+        let mut cfg = cfg_with_models();
+        cfg.openai_base_url = "https://open.bigmodel.cn/api/paas/v4".into();
+        cfg.openai_model = "glm-5.1".into();
+        cfg.thinking_type = Some("enabled".into());
+        cfg.max_tokens = Some(65536);
+
+        let mut payload = json!({});
+        apply_common_openai_options(&mut payload, &cfg, false);
+
+        assert_eq!(payload["thinking"], json!({"type":"enabled"}));
+        assert_eq!(payload["max_tokens"], json!(65536));
+        assert!(payload.get("max_completion_tokens").is_none());
     }
 
     #[test]

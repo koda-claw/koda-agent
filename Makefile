@@ -5,7 +5,7 @@ BIN ?= koda-agent
 PORT ?= 8787
 PROMPT ?= 请只回复 OK，不要调用工具。
 
-.PHONY: help fmt fmt-check clippy test check build run tmwebdriver smoke-browser smoke-tmwd-extension smoke-tmwd-matrix smoke-tmwd-static-parity smoke-rich-monitor smoke-tui smoke-http smoke-acp smoke-acp-client smoke-webhook audit-secrets audit-history release-dry-run install-local uninstall-local bootstrap-python doctor clean git-status
+.PHONY: help fmt fmt-check clippy test check build run docs docs-serve tmwebdriver smoke-browser smoke-tmwd-extension smoke-tmwd-matrix smoke-tmwd-static-parity smoke-rich-monitor smoke-tui smoke-http smoke-acp smoke-acp-client smoke-webhook audit-secrets audit-history release-dry-run install-local uninstall-local bootstrap-python doctor clean git-status
 
 help:
 	@printf '%s\n' \
@@ -17,6 +17,8 @@ help:
 	  '  make check        fmt-check + test + clippy' \
 	  '  make build        Build workspace' \
 	  '  make run PROMPT=  Run one prompt' \
+	  '  make docs         Build the Chinese mdBook tutorial site' \
+	  '  make docs-serve   Serve the Chinese mdBook tutorial site locally' \
 	  '  make tmwebdriver  Start TMWebDriver-compatible browser bridge master' \
 	  '  make smoke-browser Verify Chrome CDP browser bridge on 127.0.0.1:9222' \
 	  '  make smoke-tmwd-extension Verify installed Edge/Chrome tmwd_cdp_bridge via master' \
@@ -56,6 +58,14 @@ build:
 
 run:
 	$(CARGO) run -p $(PKG) -- --input '$(PROMPT)'
+
+docs:
+	@command -v mdbook >/dev/null 2>&1 || { echo 'mdbook is required. Install with: cargo install mdbook'; exit 127; }
+	mdbook build docs/book
+
+docs-serve:
+	@command -v mdbook >/dev/null 2>&1 || { echo 'mdbook is required. Install with: cargo install mdbook'; exit 127; }
+	mdbook serve docs/book
 
 tmwebdriver:
 	$(CARGO) run -p $(PKG) -- frontend tmwebdriver

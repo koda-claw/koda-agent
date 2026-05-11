@@ -30,3 +30,4 @@
 
 # Local release artifacts
 /dist/
+/docs/book/book/

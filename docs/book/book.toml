@@ -1,0 +1,16 @@
+[book]
+title = "Koda Agent 中文教程"
+authors = ["Koda Agent maintainers"]
+language = "zh-CN"
+src = "src"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/koda-claw/koda-agent"
+edit-url-template = "https://github.com/koda-claw/koda-agent/edit/main/docs/book/{path}"
+site-url = "/koda-agent/"
+
+[output.html.search]
+enable = true
+limit-results = 20

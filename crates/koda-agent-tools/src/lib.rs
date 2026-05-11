@@ -4,7 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use koda_agent_core::{
     AgentConfig, AgentResponse, StepOutcome, ToolDispatcher,
     python_runtime::{PythonPurpose, python_unavailable_message, resolve_python},
-    smart_format,
+    redact_secret, smart_format,
 };
 use serde_json::{Value, json};
 use std::{
@@ -197,6 +197,7 @@ impl GenericToolDispatcher {
         if let Some(path) = tmp_path {
             let _ = fs::remove_file(path);
         }
+        let stdout = redact_sensitive_output(&stdout);
         Ok(StepOutcome::next(
             json!({"status": status_str, "stdout": smart_format(&stdout, 10000, "\n\n[omitted long output]\n\n"), "exit_code": exit_code}),
             anchor_prompt(index),
@@ -820,7 +821,7 @@ impl GenericToolDispatcher {
             "{}",
             serde_json::to_string(&args)?
         )?;
-        let l0 = self.cfg.memory_dir.join("memory_management_sop.md");
+        let l0 = memory_or_resource_file(&self.cfg, "memory_management_sop.md");
         let result = if l0.exists() {
             format!(
                 "This is L0:\n{}",
@@ -2349,6 +2350,50 @@ fn global_memory_prompt_for_tools(cfg: &AgentConfig) -> String {
     )
 }
 
+fn memory_or_resource_file(cfg: &AgentConfig, name: &str) -> PathBuf {
+    let runtime = cfg.memory_dir.join(name);
+    if runtime.exists() {
+        runtime
+    } else {
+        cfg.resource_dir.join("memory").join(name)
+    }
+}
+
+fn redact_sensitive_output(raw: &str) -> String {
+    raw.lines()
+        .map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if !looks_like_secret_line(&lower) {
+                return line.to_string();
+            }
+            if let Some((key, value)) = line.split_once(':') {
+                format!("{key}: {}", redact_secret(value.trim()))
+            } else if let Some((key, value)) = line.split_once('=') {
+                format!("{key}={}", redact_secret(value.trim().trim_matches('"')))
+            } else {
+                redact_secret(line)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn looks_like_secret_line(lower: &str) -> bool {
+    const KEYS: &[&str] = &[
+        "api_key",
+        "apikey",
+        "auth_token",
+        "authorization",
+        "access_token",
+        "refresh_token",
+        "secret",
+        "password",
+        "passwd",
+        "private_key",
+    ];
+    KEYS.iter().any(|key| lower.contains(key))
+}
+
 fn value_to_string(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
@@ -2886,6 +2931,30 @@ PY"}),
     }
 
     #[tokio::test]
+    async fn code_run_redacts_secret_like_output_lines() {
+        let d = tempdir().unwrap();
+        let t = GenericToolDispatcher::new(cfg(d.path()));
+        let r = t
+            .dispatch(
+                "code_run",
+                json!({"type":"bash","script":"printf '%s\\n' 'ANTHROPIC_AUTH_TOKEN: 68563aaaab3449698b1e7c32888fc402.dHJFXY4Rkt0W2YYB' 'plain value'"}),
+                &AgentResponse {
+                    thinking: String::new(),
+                    content: String::new(),
+                    tool_calls: vec![],
+                    raw: Value::Null,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        let stdout = r.data["stdout"].as_str().unwrap();
+        assert!(stdout.contains("ANTHROPIC_AUTH_TOKEN: 6856...2YYB"));
+        assert!(!stdout.contains("dHJFXY4Rkt0W2YYB"));
+        assert!(stdout.contains("plain value"));
+    }
+
+    #[tokio::test]
     async fn code_run_honors_stop_signal_file() {
         let d = tempdir().unwrap();
         let stop_path = d.path().join("_stop_signal");
@@ -2978,6 +3047,46 @@ PY"}),
         assert!(r.data.as_str().unwrap().contains("This is L0"));
         assert!(r.next_prompt.unwrap().contains("总结提炼经验"));
         assert!(d.path().join("memory/long_term_updates.jsonl").exists());
+    }
+
+    #[tokio::test]
+    async fn start_long_term_update_reads_l0_from_resource_memory() {
+        let d = tempdir().unwrap();
+        fs::create_dir_all(d.path().join("memory")).unwrap();
+        fs::create_dir_all(d.path().join("resources/memory")).unwrap();
+        fs::create_dir_all(d.path().join("resources/assets")).unwrap();
+        fs::write(
+            d.path().join("resources/memory/memory_management_sop.md"),
+            "Resource L0 SOP",
+        )
+        .unwrap();
+        fs::write(d.path().join("memory/global_mem_insight.txt"), "L1").unwrap();
+        fs::write(
+            d.path()
+                .join("resources/assets/insight_fixed_structure.txt"),
+            "STRUCT",
+        )
+        .unwrap();
+        let mut cfg = cfg(d.path());
+        cfg.resource_dir = d.path().join("resources");
+        cfg.root_dir = cfg.resource_dir.clone();
+        let t = GenericToolDispatcher::new(cfg);
+        let r = t
+            .dispatch(
+                "start_long_term_update",
+                json!({"reason":"learned"}),
+                &AgentResponse {
+                    thinking: String::new(),
+                    content: String::new(),
+                    tool_calls: vec![],
+                    raw: Value::Null,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(r.data.as_str().unwrap().contains("Resource L0 SOP"));
+        assert!(!d.path().join("memory/memory_management_sop.md").exists());
     }
 
     #[test]
