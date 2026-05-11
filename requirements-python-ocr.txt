@@ -1,0 +1,4 @@
+# Optional OCR helper dependencies. Pin versions before enabling by default.
+# pillow
+# numpy
+# rapidocr_onnxruntime

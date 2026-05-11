@@ -1,0 +1,9 @@
+# Project-local override for the user's global Cargo config.
+# The global config replaces crates.io with a git-based USTC index, which can
+# hang at `Updating ustc index`. Keep the same replacement name but use USTC's
+# sparse HTTP index instead.
+[source.ustc]
+registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
+
+[registries.ustc]
+index = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"

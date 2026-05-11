@@ -1,0 +1,52 @@
+[default]
+base_url = "https://api.openai.com/v1"
+api_key = "sk-..."
+model = "gpt-4.1-mini"
+api_style = "chat"
+max_turns = 170
+stream = true
+timeout_secs = 600 # set 0 to disable reqwest's total request timeout; useful for very long contexts
+connect_timeout = 30
+verify = true
+
+[mixin]
+llm_nos = [0, "deepseek"] # optional ordered fallback group; empty means all configured models
+max_retries = 3
+base_delay = 1.5
+spring_back = 300
+
+[[models]]
+name = "deepseek"
+base_url = "https://api.deepseek.com/v1"
+api_key = "sk-..."
+model = "deepseek-chat"
+api_style = "chat"
+stream = true
+timeout_secs = 600
+connect_timeout_secs = 30
+verify_tls = true
+temperature = 1.0
+max_tokens = 8192
+reasoning_effort = "medium" # none|minimal|low|medium|high|xhigh
+service_tier = "auto"       # auto|default|priority|flex
+proxy = ""                  # optional http(s) proxy
+failover = true
+
+[models.headers]
+"x-extra-provider-header" = "value"
+
+[[models]]
+name = "claude"
+base_url = "https://api.anthropic.com/v1"
+api_key = "sk-ant-..."
+model = "claude-3-5-sonnet-latest"
+api_style = "claude"
+stream = true
+timeout_secs = 600
+thinking_type = "adaptive" # adaptive|enabled|disabled; enabled also needs thinking_budget_tokens
+# thinking_budget_tokens = 32768
+
+# Claude Messages API example:
+# base_url = "https://api.anthropic.com/v1"
+# model = "claude-3-5-sonnet-latest"
+# api_style = "claude"

@@ -1,0 +1,20 @@
+[package]
+name = "koda-agent-tools"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+walkdir.workspace = true
+koda-agent-core.workspace = true

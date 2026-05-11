@@ -1,0 +1,32 @@
+[package]
+name = "koda-agent-frontends"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+im = []
+gui = []
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+sha2.workspace = true
+sha1.workspace = true
+hmac.workspace = true
+serde.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+koda-agent-core.workspace = true
+futures-util.workspace = true
+uuid.workspace = true
+
+axum = "0.8"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+
+[dev-dependencies]
+tempfile.workspace = true

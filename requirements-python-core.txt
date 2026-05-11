@@ -1,0 +1,2 @@
+# Koda Agent managed Python core requirements.
+# Keep this intentionally light; add pinned packages only when a helper strictly needs them.

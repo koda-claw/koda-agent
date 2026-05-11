@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build -p koda-agent-cli --release --locked --target ${{ matrix.target }}
+      - name: Package Unix
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          mkdir -p dist/pkg
+          cp target/${{ matrix.target }}/release/koda-agent dist/pkg/koda-agent
+          tar -C dist/pkg -czf dist/koda-agent-${{ matrix.target }}.tar.gz koda-agent
+          shasum -a 256 dist/koda-agent-${{ matrix.target }}.tar.gz > dist/koda-agent-${{ matrix.target }}.tar.gz.sha256
+      - name: Package Windows
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/pkg | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/koda-agent.exe dist/pkg/koda-agent.exe
+          Compress-Archive -Path dist/pkg/koda-agent.exe -DestinationPath dist/koda-agent-${{ matrix.target }}.zip -Force
+          (Get-FileHash -Algorithm SHA256 dist/koda-agent-${{ matrix.target }}.zip).Hash.ToLower() + '  koda-agent-${{ matrix.target }}.zip' | Out-File -Encoding ascii dist/koda-agent-${{ matrix.target }}.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: koda-agent-${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Merge checksums
+        run: |
+          find artifacts -name '*.sha256' -print0 | xargs -0 cat > SHA256SUMS
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} . \;
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            koda-agent-*.tar.gz
+            koda-agent-*.zip
+            SHA256SUMS

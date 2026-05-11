@@ -1,0 +1,3 @@
+# Optional GUI/mobile automation helper dependencies. Platform-native binaries remain separate.
+# uiautomator2
+# pywin32; platform_system == "Windows"

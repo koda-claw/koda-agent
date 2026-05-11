@@ -1,0 +1,32 @@
+# Secrets
+.env
+*.env.local
+
+# Rust build
+/target/
+
+# Runtime state
+/temp/
+/logs/
+/crates/*/logs/
+/memory/global_mem.txt
+/memory/global_mem_insight.txt
+/memory/file_access_stats.json
+/memory/long_term_updates.jsonl
+/memory/L4_raw_sessions/all_histories.txt
+/memory/L4_raw_sessions/session_*.json
+/memory/erp_order_query_sop.md
+/assets/tmwd_cdp_bridge/config.js
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.bak
+
+
+!/temp/chat.html
+
+# Local release artifacts
+/dist/
