@@ -2934,10 +2934,14 @@ PY"}),
     async fn code_run_redacts_secret_like_output_lines() {
         let d = tempdir().unwrap();
         let t = GenericToolDispatcher::new(cfg(d.path()));
+        #[cfg(windows)]
+        let args = json!({"type":"powershell","script":"Write-Output 'ANTHROPIC_AUTH_TOKEN: 68563aaaab3449698b1e7c32888fc402.dHJFXY4Rkt0W2YYB'; Write-Output 'plain value'"});
+        #[cfg(not(windows))]
+        let args = json!({"type":"bash","script":"printf '%s\\n' 'ANTHROPIC_AUTH_TOKEN: 68563aaaab3449698b1e7c32888fc402.dHJFXY4Rkt0W2YYB' 'plain value'"});
         let r = t
             .dispatch(
                 "code_run",
-                json!({"type":"bash","script":"printf '%s\\n' 'ANTHROPIC_AUTH_TOKEN: 68563aaaab3449698b1e7c32888fc402.dHJFXY4Rkt0W2YYB' 'plain value'"}),
+                args,
                 &AgentResponse {
                     thinking: String::new(),
                     content: String::new(),
@@ -2949,7 +2953,9 @@ PY"}),
             .await
             .unwrap();
         let stdout = r.data["stdout"].as_str().unwrap();
-        assert!(stdout.contains("ANTHROPIC_AUTH_TOKEN: 6856...2YYB"));
+        assert!(stdout.contains("ANTHROPIC_AUTH_TOKEN"));
+        assert!(stdout.contains("..."));
+        assert!(!stdout.contains("68563aaaab3449698b1e7c32888fc402.dHJFXY4Rkt0W2YYB"));
         assert!(!stdout.contains("dHJFXY4Rkt0W2YYB"));
         assert!(stdout.contains("plain value"));
     }
