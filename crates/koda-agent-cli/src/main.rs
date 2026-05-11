@@ -138,6 +138,10 @@ enum CliCommand {
             help = "Show planned update actions without downloading or changing files"
         )]
         dry_run: bool,
+        #[arg(long, help = "Check GitHub latest release without installing")]
+        check: bool,
+        #[arg(long, help = "Emit update check result as JSON")]
+        json: bool,
         #[arg(long, help = "Skip resource repair after the binary update")]
         no_resources: bool,
         #[arg(
@@ -255,6 +259,8 @@ async fn main() -> Result<()> {
         version,
         prefix,
         dry_run,
+        check,
+        json,
         no_resources,
         bootstrap_python,
     }) = &args.command
@@ -267,6 +273,8 @@ async fn main() -> Result<()> {
                 version,
                 prefix: prefix.as_deref(),
                 dry_run: *dry_run,
+                check: *check,
+                json: *json,
                 repair_resources: !*no_resources,
                 bootstrap_python: *bootstrap_python,
             },
@@ -597,6 +605,8 @@ struct UpdateRequest<'a> {
     version: &'a str,
     prefix: Option<&'a Path>,
     dry_run: bool,
+    check: bool,
+    json: bool,
     repair_resources: bool,
     bootstrap_python: bool,
 }
@@ -623,11 +633,22 @@ async fn run_update(
         "koda-agent"
     };
     let target_binary = install_dir.join(binary_name);
+    if request.check {
+        let latest = fetch_latest_release(&repo).await?;
+        let report = update_check_report(&repo, &latest, &platform);
+        if request.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print_update_check_text(&report);
+        }
+        return Ok(());
+    }
     if request.dry_run {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "dry_run": true,
+                "current_version": env!("CARGO_PKG_VERSION"),
                 "repo": repo,
                 "version": request.version,
                 "target": platform.target,
@@ -695,6 +716,7 @@ async fn run_update(
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
             "updated": true,
+            "previous_version": env!("CARGO_PKG_VERSION"),
             "repo": repo,
             "version": request.version,
             "target": platform.target,
@@ -705,6 +727,14 @@ async fn run_update(
         }))?
     );
     Ok(())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    html_url: String,
+    prerelease: bool,
+    draft: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -766,6 +796,97 @@ fn release_urls(repo: &str, version: &str, platform: &UpdatePlatform) -> Release
         archive: format!("{base}/{}", platform.archive_name),
         checksums: format!("{base}/SHA256SUMS"),
     }
+}
+
+async fn fetch_latest_release(repo: &str) -> Result<GithubRelease> {
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let response = reqwest::Client::new()
+        .get(&url)
+        .header(reqwest::header::USER_AGENT, "koda-agent-updater")
+        .send()
+        .await
+        .with_context(|| format!("check latest release {url}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("check latest release {url} failed with {status}");
+    }
+    response
+        .json::<GithubRelease>()
+        .await
+        .with_context(|| format!("parse latest release response from {url}"))
+}
+
+fn update_check_report(
+    repo: &str,
+    latest: &GithubRelease,
+    platform: &UpdatePlatform,
+) -> serde_json::Value {
+    let current = env!("CARGO_PKG_VERSION");
+    let latest_version = latest.tag_name.trim_start_matches('v');
+    let cmp = compare_version_like(current, latest_version);
+    let update_available = cmp
+        .map(|ord| ord.is_lt())
+        .unwrap_or(current != latest_version);
+    let urls = release_urls(repo, &latest.tag_name, platform);
+    serde_json::json!({
+        "repo": repo,
+        "current_version": current,
+        "latest_version": latest_version,
+        "latest_tag": latest.tag_name,
+        "update_available": update_available,
+        "comparison": cmp.map(|ord| match ord {
+            std::cmp::Ordering::Less => "older",
+            std::cmp::Ordering::Equal => "equal",
+            std::cmp::Ordering::Greater => "newer",
+        }),
+        "target": platform.target,
+        "archive": platform.archive_name,
+        "download_url": urls.archive,
+        "checksum_url": urls.checksums,
+        "release_url": latest.html_url,
+        "prerelease": latest.prerelease,
+        "draft": latest.draft,
+    })
+}
+
+fn print_update_check_text(report: &serde_json::Value) {
+    let current = report["current_version"].as_str().unwrap_or("unknown");
+    let latest_tag = report["latest_tag"].as_str().unwrap_or("unknown");
+    let target = report["target"].as_str().unwrap_or("unknown");
+    let release_url = report["release_url"].as_str().unwrap_or("");
+    let update_available = report["update_available"].as_bool().unwrap_or(false);
+    println!("Koda Agent update check");
+    println!("  current: v{current}");
+    println!("  latest: {latest_tag}");
+    println!("  target: {target}");
+    if update_available {
+        println!("  status: update available");
+        println!("  run: koda-agent update --version {latest_tag}");
+    } else {
+        println!("  status: already up to date");
+    }
+    if !release_url.is_empty() {
+        println!("  release: {release_url}");
+    }
+}
+
+fn compare_version_like(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    let left = parse_version_like(left)?;
+    let right = parse_version_like(right)?;
+    Some(left.cmp(&right))
+}
+
+fn parse_version_like(version: &str) -> Option<Vec<u64>> {
+    let core = version
+        .trim_start_matches('v')
+        .split_once('-')
+        .map(|(core, _)| core)
+        .unwrap_or(version.trim_start_matches('v'));
+    let mut out = Vec::new();
+    for part in core.split('.') {
+        out.push(part.parse().ok()?);
+    }
+    Some(out)
 }
 
 fn validate_repo_slug(repo: &str) -> Result<()> {
@@ -3480,5 +3601,22 @@ mod tests {
         );
         assert!(validate_repo_slug("koda-claw/koda-agent").is_ok());
         assert!(validate_repo_slug("https://github.com/koda-claw/koda-agent").is_err());
+    }
+
+    #[test]
+    fn update_version_check_compares_semver_like_tags() {
+        use std::cmp::Ordering;
+
+        assert_eq!(compare_version_like("0.1.1", "0.1.2"), Some(Ordering::Less));
+        assert_eq!(
+            compare_version_like("v0.1.2", "0.1.2"),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            compare_version_like("0.2.0", "0.1.9"),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(parse_version_like("0.1.2-alpha.1").unwrap(), vec![0, 1, 2]);
+        assert!(compare_version_like("dev", "0.1.2").is_none());
     }
 }

@@ -114,9 +114,15 @@ Installed users can update directly with the binary. This path is preferred
 because it works without a checked-out repository:
 
 ```bash
+koda-agent update --check
+koda-agent update --check --json
 koda-agent update --repo koda-claw/koda-agent --version latest
 koda-agent update --repo koda-claw/koda-agent --version v0.1.0
 ```
+
+`--check` queries GitHub's latest release metadata, compares it with the
+installed CLI version printed by `koda-agent --version`, and reports whether an
+update is available without downloading or replacing anything.
 
 `koda-agent update` detects the current platform, downloads the matching GitHub
 Release asset, verifies `SHA256SUMS`, replaces the installed binary, and repairs
