@@ -11,6 +11,28 @@ koda-agent tui --full
 
 高级用户仍可直接编辑 `~/.koda-agent/config/llms.toml`，配置多模型、故障转移、Claude Messages API、OpenAI Responses API、中转服务、代理、thinking/reasoning 等高级选项。
 
+## 实施状态（已完成）
+
+截至 `v0.1.3`，本方案的 Iteration 0-7 已实现并通过验收。当前文档作为设计记录和验收追溯保留；用户操作入口以 `README.md`、`docs/configuration.md`、`docs/installation.md` 和 `docs/release-notes.md` 为准。
+
+已落地能力：
+
+- `llms.toml` profile-first 主配置路径。
+- `config setup/path/validate/list/show/use/secret/add/set/remove/migrate` 配置管理闭环。
+- `auth_scheme/auth_header` provider 认证模型，覆盖 Bearer、`api-key` header、Claude `x-api-key`。
+- Runtime `--profile`、`--llm-no`、`/llm <name>` profile 切换。
+- Full TUI Inspector 展示 active profile 和 model。
+- 旧 `OPENAI_*` 配置迁移提示与 `config migrate` 自助迁移。
+- release/install 配套、真实 LLM smoke、TUI 非 TTY smoke、secret/history audit。
+
+验收证据：
+
+- `cargo fmt --all --check` passed。
+- `cargo test --workspace --all-features` passed。
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` passed。
+- `make release-dry-run` passed。
+- `scripts/audit-secrets.sh` / `scripts/audit-history.sh` exited 0，命中项仅为 placeholder/test fixture 或 ignored runtime 文件。
+
 ## 背景与原则
 
 原版 GenericAgent 使用 `mykey.py` / `mykey.json` 作为主配置，变量名决定 Session 类型，例如 `native_oai_config`、`native_claude_config`、`oai_config`、`claude_config`、`mixin_config`。Rust 版应保留这个语义，但用更安全、更结构化的 `llms.toml + .env + CLI setup` 替代手写 Python 配置。
