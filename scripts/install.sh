@@ -90,16 +90,17 @@ else
     url="https://github.com/$REPO/releases/download/$VERSION/koda-agent-$target.tar.gz"
     sum_url="https://github.com/$REPO/releases/download/$VERSION/SHA256SUMS"
   fi
+  archive="koda-agent-$target.tar.gz"
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
   run mkdir -p "$BIN_DIR" "$DATA_DIR"
-  run curl -fsSL "$url" -o "$tmp/koda-agent.tar.gz"
+  run curl -fsSL "$url" -o "$tmp/$archive"
   if curl -fsSL "$sum_url" -o "$tmp/SHA256SUMS" 2>/dev/null; then
     (cd "$tmp" && grep "koda-agent-$target.tar.gz" SHA256SUMS | shasum -a 256 -c -)
   else
     echo 'Warning: checksum file unavailable; skipping SHA256 verification.' >&2
   fi
-  run tar -xzf "$tmp/koda-agent.tar.gz" -C "$tmp"
+  run tar -xzf "$tmp/$archive" -C "$tmp"
   run install -m 0755 "$tmp/koda-agent" "$BIN_DIR/koda-agent"
   copy_resources "$tmp/resources"
 fi
