@@ -36,6 +36,7 @@ koda-agent [OPTIONS] [COMMAND]
 | `config` | 管理 LLM profiles、model aliases、secrets 和配置校验。 |
 | `update` | 从 GitHub Releases 更新已安装二进制。 |
 | `tui` | 启动交互式终端 UI。 |
+| `goal` | 启动持续自驱的 Goal Mode，会按预算自动继续推进并在耗尽时收口。 |
 | `serve-acp` | 启动 ACP JSON-RPC-over-JSONL bridge。 |
 | `frontend` | 启动指定 frontend adapter，例如 `tmwebdriver`。 |
 | `memory` | 审计、沉淀、召回和归档长期记忆。 |
@@ -212,6 +213,32 @@ koda-agent tui --line
 - `tui`：稳定 line-mode。
 - `tui --full`：全屏 Ratatui UI。
 - `tui --line`：强制 line-mode。
+
+## goal
+
+```bash
+koda-agent goal "持续优化当前项目" --budget 30m
+koda-agent goal "补齐浏览器桥接验收矩阵" --budget 2h --max-turns 80
+koda-agent goal "继续上次目标" --resume
+koda-agent goal "只创建状态不启动" --dry-run --json
+```
+
+`goal` 是原版 `goal_mode_sop.md` + `reflect/goal_mode.py` 的易用入口。CLI 会创建 `temp/goal_state.json`，然后用原生 reflect 状态机持续唤醒 agent，直到时间预算或轮次上限耗尽。
+
+关键行为：
+
+- 默认预算 `30m`，默认最多 `50` 轮。
+- 预算未耗尽时不会停下来问“是否继续”，而是继续找下一个改进点。
+- 预算耗尽后进入收口轮，完成后把 state 标记为 `done_budget`。
+- `--state <PATH>` 可指定状态文件；相对路径按 workspace 解析。
+- `--resume` 复用已有 state，不创建新目标。
+- 新建目标时如果目标 state 已存在，会先写 `.bak.<timestamp>` 备份。
+
+兼容低层入口仍然可用：
+
+```bash
+GOAL_STATE=temp/goal_state.json koda-agent --reflect goal_mode
+```
 
 ## update
 

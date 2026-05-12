@@ -191,6 +191,40 @@ enum CliCommand {
         #[arg(long, conflicts_with = "full", help = "Use the stable line-mode TUI")]
         line: bool,
     },
+    #[command(about = "Run a self-driving Goal Mode session until budget is exhausted")]
+    Goal {
+        #[arg(required = true, num_args = 1.., help = "Goal objective text")]
+        objective: Vec<String>,
+        #[arg(
+            long,
+            default_value = "30m",
+            help = "Time budget: seconds or suffix s/m/h, for example 1800, 30m, 2h"
+        )]
+        budget: String,
+        #[arg(
+            long = "max-turns",
+            default_value_t = 50,
+            help = "Maximum wake-up turns"
+        )]
+        max_turns: u64,
+        #[arg(
+            long,
+            help = "Goal state JSON path; relative paths are resolved from the workspace"
+        )]
+        state: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Resume an existing goal state instead of creating a new one"
+        )]
+        resume: bool,
+        #[arg(
+            long,
+            help = "Create or inspect state without starting the reflect loop"
+        )]
+        dry_run: bool,
+        #[arg(long, help = "Emit the created/resolved goal state as JSON")]
+        json: bool,
+    },
     #[command(about = "Serve the ACP JSON-RPC bridge over JSONL")]
     ServeAcp,
     #[command(about = "Start a named frontend adapter such as tmwebdriver")]
@@ -644,6 +678,29 @@ async fn main() -> Result<()> {
                 return tui_full::run_tui_full(cfg).await;
             }
             return run_tui(cfg).await;
+        }
+        Some(CliCommand::Goal {
+            objective,
+            budget,
+            max_turns,
+            state,
+            resume,
+            dry_run,
+            json,
+        }) => {
+            return run_goal_command(
+                cfg,
+                GoalCommandRequest {
+                    objective,
+                    budget,
+                    max_turns,
+                    state,
+                    resume,
+                    dry_run,
+                    json,
+                },
+            )
+            .await;
         }
         None => {}
     }
@@ -4001,6 +4058,120 @@ async fn run_reflect_mode(runtime: AgentRuntime, cfg: AgentConfig, script: Strin
     Ok(())
 }
 
+struct GoalCommandRequest {
+    objective: Vec<String>,
+    budget: String,
+    max_turns: u64,
+    state: Option<PathBuf>,
+    resume: bool,
+    dry_run: bool,
+    json: bool,
+}
+
+async fn run_goal_command(cfg: AgentConfig, req: GoalCommandRequest) -> Result<()> {
+    let state_path = resolve_goal_state_path(&cfg.workspace_dir, req.state.as_deref());
+    if req.resume {
+        if !state_path.exists() {
+            bail!(
+                "goal state not found: {}. Remove --resume or pass --state to an existing file.",
+                state_path.display()
+            );
+        }
+    } else {
+        let objective = req.objective.join(" ").trim().to_string();
+        if objective.is_empty() {
+            bail!("goal objective is empty");
+        }
+        let budget_seconds = parse_goal_budget_seconds(&req.budget)?;
+        write_goal_state(
+            &state_path,
+            &objective,
+            budget_seconds,
+            req.max_turns.max(1),
+            chrono::Local::now().timestamp(),
+        )?;
+    }
+    if req.json {
+        let state = fs::read_to_string(&state_path)
+            .with_context(|| format!("read goal state {}", state_path.display()))?;
+        println!("{state}");
+    } else {
+        println!("Goal Mode state: {}", state_path.display());
+        if req.dry_run {
+            println!(
+                "Next: GOAL_STATE={} koda-agent --reflect goal_mode",
+                state_path.display()
+            );
+        }
+    }
+    if req.dry_run {
+        return Ok(());
+    }
+    unsafe {
+        env::set_var("GOAL_STATE", &state_path);
+    }
+    let runtime = build_runtime(cfg.clone())?;
+    run_reflect_mode(runtime, cfg, "goal_mode".into()).await
+}
+
+fn resolve_goal_state_path(root_dir: &Path, state: Option<&Path>) -> PathBuf {
+    let path = state
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root_dir.join("temp/goal_state.json"));
+    if path.is_absolute() {
+        path
+    } else {
+        root_dir.join(path)
+    }
+}
+
+fn write_goal_state(
+    path: &Path,
+    objective: &str,
+    budget_seconds: u64,
+    max_turns: u64,
+    now_secs: i64,
+) -> Result<()> {
+    if path.exists() {
+        let backup = path.with_extension(format!("json.bak.{now_secs}"));
+        fs::copy(path, &backup)
+            .with_context(|| format!("backup existing goal state to {}", backup.display()))?;
+    }
+    let state = serde_json::json!({
+        "objective": objective,
+        "status": "running",
+        "start_time": now_secs,
+        "budget_seconds": budget_seconds,
+        "turns_used": 0,
+        "max_turns": max_turns,
+    });
+    save_goal_state(path, &state)
+}
+
+fn parse_goal_budget_seconds(raw: &str) -> Result<u64> {
+    let text = raw.trim();
+    if text.is_empty() {
+        bail!("goal budget is empty");
+    }
+    let (number, multiplier) = match text.chars().last().unwrap() {
+        's' | 'S' => (&text[..text.len() - 1], 1_u64),
+        'm' | 'M' => (&text[..text.len() - 1], 60_u64),
+        'h' | 'H' => (&text[..text.len() - 1], 3600_u64),
+        _ => (text, 1_u64),
+    };
+    let value: u64 = number
+        .trim()
+        .parse()
+        .with_context(|| format!("invalid goal budget `{raw}`; use seconds or suffix s/m/h"))?;
+    let seconds = value
+        .checked_mul(multiplier)
+        .context("goal budget is too large")?;
+    if seconds == 0 {
+        bail!("goal budget must be greater than 0");
+    }
+    Ok(seconds)
+}
+
 async fn reflect_check_once(script: &Path, cfg: &AgentConfig) -> Result<ReflectProbe> {
     if is_native_autonomous_reflect(script) {
         return Ok(reflect_check_autonomous());
@@ -5904,6 +6075,61 @@ mod tests {
     }
 
     #[test]
+    fn goal_command_state_creation_matches_native_reflect_contract() {
+        let d = tempfile::tempdir().unwrap();
+        let state = resolve_goal_state_path(d.path(), None);
+        write_goal_state(&state, "Keep improving", 1800, 12, 1000).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&state).unwrap()).unwrap();
+        assert_eq!(value["objective"], "Keep improving");
+        assert_eq!(value["status"], "running");
+        assert_eq!(value["start_time"], 1000);
+        assert_eq!(value["budget_seconds"], 1800);
+        assert_eq!(value["turns_used"], 0);
+        assert_eq!(value["max_turns"], 12);
+
+        let probe = reflect_check_goal_state(&state, 1060).unwrap();
+        assert!(probe.task.unwrap().contains("Keep improving"));
+    }
+
+    #[test]
+    fn goal_budget_parser_accepts_seconds_minutes_and_hours() {
+        assert_eq!(parse_goal_budget_seconds("90").unwrap(), 90);
+        assert_eq!(parse_goal_budget_seconds("30m").unwrap(), 1800);
+        assert_eq!(parse_goal_budget_seconds("2h").unwrap(), 7200);
+        assert!(parse_goal_budget_seconds("0m").is_err());
+        assert!(parse_goal_budget_seconds("bad").is_err());
+    }
+
+    #[test]
+    fn goal_cli_accepts_objective_before_options() {
+        let args = Args::parse_from([
+            "koda-agent",
+            "goal",
+            "持续优化当前项目",
+            "--budget",
+            "30m",
+            "--max-turns",
+            "12",
+            "--dry-run",
+        ]);
+        let Some(CliCommand::Goal {
+            objective,
+            budget,
+            max_turns,
+            dry_run,
+            ..
+        }) = args.command
+        else {
+            panic!("expected goal command");
+        };
+        assert_eq!(objective, vec!["持续优化当前项目"]);
+        assert_eq!(budget, "30m");
+        assert_eq!(max_turns, 12);
+        assert!(dry_run);
+    }
+
+    #[test]
     fn json_goal_reflect_kind_uses_native_on_done_state_machine() {
         let d = tempfile::tempdir().unwrap();
         let state = d.path().join("temp/goal_state.json");
@@ -6742,6 +6968,7 @@ id = "mimo-v2.5-pro"
             "resources         Install, repair, or inspect packaged static resources",
             "config            Manage LLM profiles, model aliases, secrets, and validation",
             "memory            Audit, settle, recall, and archive long-term memory",
+            "goal              Run a self-driving Goal Mode session until budget is exhausted",
         ] {
             assert!(
                 help.contains(expected),

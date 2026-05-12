@@ -1,5 +1,10 @@
 # Release Notes
 
+## v0.1.5
+
+- Added `koda-agent goal` as a first-class Goal Mode entrypoint. It creates the upstream-compatible `goal_state.json`, starts the native `goal_mode` reflect loop, supports `--budget`, `--max-turns`, `--state`, `--resume`, `--dry-run`, and `--json`, and keeps the lower-level `GOAL_STATE=... koda-agent --reflect goal_mode` path available.
+- Documented Goal Mode usage in the Chinese CLI manual.
+
 ## v0.1.4
 
 - Updated default LLM templates for current provider surfaces: DeepSeek now only ships `deepseek-v4-pro` / `deepseek-v4-flash`, OpenAI defaults to GPT-5 family aliases, and GLM/BigModel is available through `config setup glm`.
