@@ -44,7 +44,9 @@ use tokio::sync::mpsc;
 use tool_cards::{render_tool_call_card, render_tool_result_card};
 
 #[cfg(test)]
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind,
+};
 
 const MAX_TIMELINE_ITEMS: usize = 2_000;
 const MAX_RUNTIME_EVENTS_PER_FRAME: usize = 1;
@@ -240,7 +242,6 @@ fn reset_terminal_mouse_modes() {
     );
     let _ = out.flush();
 }
-
 
 #[derive(Debug)]
 enum TuiRuntimeEvent {
@@ -1618,7 +1619,10 @@ mod tests {
         assert_eq!(reduce_key_event(&mut state, release_q), KeyAction::None);
         // Press 'q' on empty composer still quits.
         assert_eq!(
-            reduce_key_event(&mut state, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            reduce_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
+            ),
             KeyAction::Quit
         );
     }

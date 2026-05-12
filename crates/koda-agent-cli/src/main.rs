@@ -6997,10 +6997,15 @@ id = "mimo-v2.5-pro"
     fn config_migrate_imports_legacy_openai_and_copies_key_to_home_env() {
         // Save and clear interfering process env vars so that
         // env_value_available_any falls through to the .env file on disk.
-        let saved: Vec<_> = ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_STYLE"]
-            .iter()
-            .map(|k| (k, std::env::var(k).ok()))
-            .collect();
+        let saved: Vec<_> = [
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "OPENAI_MODEL",
+            "OPENAI_API_STYLE",
+        ]
+        .iter()
+        .map(|k| (k, std::env::var(k).ok()))
+        .collect();
         for (k, _) in &saved {
             unsafe { std::env::remove_var(k) };
         }
