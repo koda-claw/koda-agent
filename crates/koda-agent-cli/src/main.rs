@@ -193,8 +193,8 @@ enum CliCommand {
     },
     #[command(about = "Run a self-driving Goal Mode session until budget is exhausted")]
     Goal {
-        #[arg(required = true, num_args = 1.., help = "Goal objective text")]
-        objective: Vec<String>,
+        #[arg(required = true, help = "Goal objective text")]
+        objective: String,
         #[arg(
             long,
             default_value = "30m",
@@ -4059,7 +4059,7 @@ async fn run_reflect_mode(runtime: AgentRuntime, cfg: AgentConfig, script: Strin
 }
 
 struct GoalCommandRequest {
-    objective: Vec<String>,
+    objective: String,
     budget: String,
     max_turns: u64,
     state: Option<PathBuf>,
@@ -4078,7 +4078,7 @@ async fn run_goal_command(cfg: AgentConfig, req: GoalCommandRequest) -> Result<(
             );
         }
     } else {
-        let objective = req.objective.join(" ").trim().to_string();
+        let objective = req.objective.trim().to_string();
         if objective.is_empty() {
             bail!("goal objective is empty");
         }
@@ -6102,7 +6102,7 @@ mod tests {
     }
 
     #[test]
-    fn goal_cli_accepts_objective_before_options() {
+    fn goal_cli_accepts_quoted_objective_before_options() {
         let args = Args::parse_from([
             "koda-agent",
             "goal",
@@ -6123,7 +6123,7 @@ mod tests {
         else {
             panic!("expected goal command");
         };
-        assert_eq!(objective, vec!["持续优化当前项目"]);
+        assert_eq!(objective, "持续优化当前项目");
         assert_eq!(budget, "30m");
         assert_eq!(max_turns, 12);
         assert!(dry_run);
