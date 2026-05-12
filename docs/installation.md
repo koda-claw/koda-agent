@@ -17,7 +17,7 @@ Install a specific release tag:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.sh \
-  | KODA_AGENT_REPO=koda-claw/koda-agent KODA_AGENT_VERSION=v0.1.5 sh
+  | KODA_AGENT_REPO=koda-claw/koda-agent KODA_AGENT_VERSION=v0.1.7 sh
 ```
 
 Source install from a checked-out repository:
@@ -58,7 +58,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=$env:TEMP+'\koda-agen
 Install a specific release tag:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=$env:TEMP+'\koda-agent-install.ps1'; iwr -UseBasicParsing https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.ps1 -OutFile $s; & $s -Repo koda-claw/koda-agent -Version v0.1.5"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=$env:TEMP+'\koda-agent-install.ps1'; iwr -UseBasicParsing https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.ps1 -OutFile $s; & $s -Repo koda-claw/koda-agent -Version v0.1.7"
 ```
 
 Source install from a checked-out repository:
@@ -164,7 +164,7 @@ because it works without a checked-out repository:
 koda-agent update --check
 koda-agent update --check --json
 koda-agent update --repo koda-claw/koda-agent --version latest
-koda-agent update --repo koda-claw/koda-agent --version v0.1.5
+koda-agent update --repo koda-claw/koda-agent --version v0.1.7
 ```
 
 `--check` queries GitHub's latest release metadata, compares it with the

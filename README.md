@@ -23,7 +23,7 @@ Install a specific release tag:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.sh \
-  | KODA_AGENT_REPO=koda-claw/koda-agent KODA_AGENT_VERSION=v0.1.5 sh
+  | KODA_AGENT_REPO=koda-claw/koda-agent KODA_AGENT_VERSION=v0.1.7 sh
 ```
 
 Windows PowerShell:
@@ -35,7 +35,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=$env:TEMP+'\koda-agen
 Windows PowerShell with a specific release tag:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=$env:TEMP+'\koda-agent-install.ps1'; iwr -UseBasicParsing https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.ps1 -OutFile $s; & $s -Repo koda-claw/koda-agent -Version v0.1.5"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=$env:TEMP+'\koda-agent-install.ps1'; iwr -UseBasicParsing https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.ps1 -OutFile $s; & $s -Repo koda-claw/koda-agent -Version v0.1.7"
 ```
 
 Source install from this checkout, useful for contributors:
@@ -62,7 +62,7 @@ checkout:
 
 ```bash
 koda-agent update --repo koda-claw/koda-agent --version latest
-koda-agent update --repo koda-claw/koda-agent --version v0.1.5
+koda-agent update --repo koda-claw/koda-agent --version v0.1.7
 koda-agent update --check
 koda-agent update --check --json
 ```

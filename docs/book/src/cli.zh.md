@@ -246,7 +246,7 @@ GOAL_STATE=temp/goal_state.json koda-agent --reflect goal_mode
 koda-agent update --check
 koda-agent update --check --json
 koda-agent update --repo koda-claw/koda-agent --version latest
-koda-agent update --repo koda-claw/koda-agent --version v0.1.5
+koda-agent update --repo koda-claw/koda-agent --version v0.1.7
 ```
 
 `update` 会从 GitHub Releases 选择当前平台资产，校验 `SHA256SUMS`，替换二进制，并默认修复 resources。

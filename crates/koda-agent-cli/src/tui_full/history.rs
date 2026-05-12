@@ -68,11 +68,12 @@ fn load_history_session_file(path: &Path) -> serde_json::Result<RawSessionFile> 
 }
 
 fn history_session_to_tui(raw: RawSessionFile, id: usize) -> LoadedHistorySession {
-    let title = raw
-        .session
-        .as_deref()
-        .map(history_session_title)
-        .unwrap_or_else(|| format!("history-{id}"));
+    let title = history_prompt_title(&raw.history).unwrap_or_else(|| {
+        raw.session
+            .as_deref()
+            .map(history_session_title)
+            .unwrap_or_else(|| format!("history-{id}"))
+    });
     let history_info = raw.history.clone();
     let mut timeline = Vec::new();
     let created = raw.created_at.as_deref().unwrap_or("unknown time");
@@ -125,17 +126,148 @@ fn history_session_title(session: &str) -> String {
     trim_chars(&format!("hist-{short}"), 32)
 }
 
+fn history_prompt_title(history: &[String]) -> Option<String> {
+    history.iter().find_map(|line| {
+        let prompt = line.trim().strip_prefix("[USER]:")?.trim();
+        if prompt.is_empty() {
+            None
+        } else {
+            Some(trim_chars(&format!("hist {}", compact_title(prompt)), 32))
+        }
+    })
+}
+
+fn compact_title(text: &str) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    compact
+        .trim_matches(|ch: char| ch == '"' || ch == '\'' || ch.is_ascii_punctuation())
+        .to_string()
+}
+
 fn history_line_to_timeline(line: &str) -> TimelineItem {
     let trimmed = line.trim();
     if let Some(rest) = trimmed.strip_prefix("[USER]:") {
         TimelineItem::User(rest.trim().to_string())
     } else if let Some(rest) = trimmed.strip_prefix("[Agent]") {
-        TimelineItem::Assistant(rest.trim_start_matches(':').trim().to_string())
+        parse_agent_history_line(rest)
     } else if let Some(rest) = trimmed.strip_prefix("[ASSISTANT]:") {
         TimelineItem::Assistant(rest.trim().to_string())
+    } else if let Some(rest) = trimmed.strip_prefix("[ToolCall]") {
+        parse_tool_call_history_line(rest.trim())
+            .unwrap_or_else(|| TimelineItem::System(trimmed.to_string()))
+    } else if let Some(rest) = trimmed.strip_prefix("[ToolResult]") {
+        parse_tool_result_history_line(rest.trim())
     } else {
         TimelineItem::System(trimmed.to_string())
     }
+}
+
+fn parse_agent_history_line(rest: &str) -> TimelineItem {
+    let trimmed = rest.trim_start_matches(':').trim();
+    if let Some(item) = parse_tool_call_summary(trimmed) {
+        return item;
+    }
+    // Detect tool result lines from line-mode TUI history:
+    //   "调用工具结果 {name} {data}"
+    if let Some(item) = parse_named_payload(
+        trimmed
+            .strip_prefix("调用工具结果 ")
+            .or_else(|| trimmed.strip_prefix("tool result ")),
+        |name, data| TimelineItem::ToolResult {
+            name,
+            args: String::new(),
+            data,
+        },
+    ) {
+        return item;
+    }
+    TimelineItem::Assistant(trimmed.to_string())
+}
+
+fn parse_tool_call_summary(trimmed: &str) -> Option<TimelineItem> {
+    // Current fallback_turn_summary format is Chinese. Keep English and
+    // structured variants here so historical rendering is not tied to one UI
+    // locale forever.
+    for prefix in ["调用工具", "tool call ", "called tool "] {
+        if let Some(tool_part) = trimmed.strip_prefix(prefix)
+            && let Some((name, args)) = tool_part.split_once(", args: ")
+        {
+            let name = name.trim();
+            if is_tool_name_like(name) {
+                return Some(TimelineItem::ToolCall {
+                    name: name.to_string(),
+                    args: args.trim().to_string(),
+                });
+            }
+        }
+    }
+    None
+}
+
+fn parse_tool_call_history_line(rest: &str) -> Option<TimelineItem> {
+    let rest = rest.trim_start_matches(':').trim();
+    if let Some(item) = parse_tool_call_json(rest) {
+        return Some(item);
+    }
+    parse_named_payload(Some(rest), |name, args| TimelineItem::ToolCall {
+        name,
+        args,
+    })
+}
+
+fn parse_tool_call_json(rest: &str) -> Option<TimelineItem> {
+    let value = serde_json::from_str::<serde_json::Value>(rest).ok()?;
+    let name = value
+        .get("name")
+        .and_then(serde_json::Value::as_str)?
+        .trim();
+    if !is_tool_name_like(name) {
+        return None;
+    }
+    let args = value
+        .get("args")
+        .or_else(|| value.get("arguments"))
+        .map(|v| {
+            v.as_str()
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| v.to_string())
+        })
+        .unwrap_or_default();
+    Some(TimelineItem::ToolCall {
+        name: name.to_string(),
+        args,
+    })
+}
+
+fn parse_tool_result_history_line(rest: &str) -> TimelineItem {
+    // Format: "[ToolResult] {name} {data}"
+    let rest = rest.trim_start_matches(':').trim();
+    parse_named_payload(Some(rest), |name, data| TimelineItem::ToolResult {
+        name,
+        args: String::new(),
+        data,
+    })
+    .unwrap_or_else(|| TimelineItem::System(format!("[ToolResult] {rest}")))
+}
+
+fn parse_named_payload<F>(rest: Option<&str>, build: F) -> Option<TimelineItem>
+where
+    F: FnOnce(String, String) -> TimelineItem,
+{
+    let rest = rest?.trim();
+    let (name, payload) = rest.split_once(' ')?;
+    let name = name.trim();
+    if !is_tool_name_like(name) {
+        return None;
+    }
+    Some(build(name.to_string(), payload.trim().to_string()))
+}
+
+fn is_tool_name_like(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.')
 }
 
 #[cfg(test)]
@@ -204,16 +336,52 @@ mod tests {
         let loaded = load_recent_history_sessions(&cfg, 2);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].session.id, 2);
-        assert!(loaded[0].session.name.starts_with("hist-20260510"));
+        assert_eq!(loaded[0].session.name, "hist 你好");
         assert_eq!(loaded[0].history_info.len(), 3);
         assert_eq!(loaded[0].messages.len(), 1);
+
+        // timeline[0] = System("Loaded historical session...")
         assert!(matches!(
             loaded[0].session.timeline[1],
             TimelineItem::User(_)
         ));
+        // tool call line parsed as ToolCall, not Assistant
+        assert!(
+            matches!(&loaded[0].session.timeline[2], TimelineItem::ToolCall { name, args } if name == "file_read" && args == "{}"),
+            "expected ToolCall(file_read), got {:?}",
+            loaded[0].session.timeline[2]
+        );
         assert!(matches!(
-            loaded[0].session.timeline[2],
+            loaded[0].session.timeline[3],
             TimelineItem::Assistant(_)
+        ));
+    }
+
+    #[test]
+    fn parses_tool_call_and_tool_result_from_history_lines() {
+        assert!(matches!(
+            history_line_to_timeline("[Agent] 调用工具web_scan, args: {\"url\":\"https://example.test\"}"),
+            TimelineItem::ToolCall { name, args } if name == "web_scan" && args.contains("example.test")
+        ));
+        assert!(matches!(
+            history_line_to_timeline("[Agent] 直接回答了用户问题"),
+            TimelineItem::Assistant(text) if text == "直接回答了用户问题"
+        ));
+        assert!(matches!(
+            history_line_to_timeline("[ToolResult] file_read ok"),
+            TimelineItem::ToolResult { name, data, .. } if name == "file_read" && data == "ok"
+        ));
+        assert!(matches!(
+            history_line_to_timeline("[ToolCall] file_patch {\"path\":\"README.md\"}"),
+            TimelineItem::ToolCall { name, args } if name == "file_patch" && args.contains("README.md")
+        ));
+        assert!(matches!(
+            history_line_to_timeline("[ToolCall] {\"name\":\"ask_user\",\"arguments\":{\"question\":\"确认?\"}}"),
+            TimelineItem::ToolCall { name, args } if name == "ask_user" && args.contains("question")
+        ));
+        assert!(matches!(
+            history_line_to_timeline("[Agent] tool call code_run, args: {\"code\":\"1+1\"}"),
+            TimelineItem::ToolCall { name, args } if name == "code_run" && args.contains("1+1")
         ));
     }
 }

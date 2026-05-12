@@ -1,5 +1,11 @@
 # Release Notes
 
+## v0.1.7
+
+- Improved full-screen TUI session naming: default sessions are auto-named from the first user prompt, historical sessions prefer their first user prompt over timestamp-only names, and the Sessions sidebar keeps more readable title width.
+- Hardened full-screen TUI historical tool rendering by parsing Chinese/English tool-call summaries plus structured `[ToolCall]` / `[ToolResult]` lines back into tool cards.
+- Unified session activation behavior so keyboard, mouse, slash-command, and close fallback switches clear unread/unseen counters consistently.
+
 ## v0.1.5
 
 - Added `koda-agent goal` as a first-class Goal Mode entrypoint. It creates the upstream-compatible `goal_state.json`, starts the native `goal_mode` reflect loop, supports `--budget`, `--max-turns`, `--state`, `--resume`, `--dry-run`, and `--json`, and keeps the lower-level `GOAL_STATE=... koda-agent --reflect goal_mode` path available.

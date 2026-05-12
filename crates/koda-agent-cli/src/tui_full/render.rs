@@ -129,6 +129,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &TuiAppState) {
 }
 
 fn render_sessions(frame: &mut Frame<'_>, area: Rect, state: &TuiAppState) {
+    let name_width = usize::from(area.width.saturating_sub(17)).clamp(8, 28);
     let items = state
         .sessions
         .values()
@@ -150,7 +151,7 @@ fn render_sessions(frame: &mut Frame<'_>, area: Rect, state: &TuiAppState) {
                 Span::styled(marker, Style::default().fg(Color::LightGreen)),
                 Span::raw(format!(" #{} ", session.id)),
                 Span::styled(
-                    trim_chars(&session.name, 12),
+                    trim_chars(&session.name, name_width),
                     Style::default().fg(Color::White),
                 ),
                 Span::raw(" "),

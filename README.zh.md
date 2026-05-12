@@ -19,7 +19,7 @@ curl -fsSL https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/i
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.sh \
-  | KODA_AGENT_REPO=koda-claw/koda-agent KODA_AGENT_VERSION=v0.1.5 sh
+  | KODA_AGENT_REPO=koda-claw/koda-agent KODA_AGENT_VERSION=v0.1.7 sh
 ```
 
 默认安装到 `~/.local/bin/koda-agent`。如果命令不可用，把 `~/.local/bin` 加入 `PATH`，或打开一个新终端后再试。
@@ -35,7 +35,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=$env:TEMP+'\koda-agen
 安装指定版本：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=$env:TEMP+'\koda-agent-install.ps1'; iwr -UseBasicParsing https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.ps1 -OutFile $s; & $s -Repo koda-claw/koda-agent -Version v0.1.5"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=$env:TEMP+'\koda-agent-install.ps1'; iwr -UseBasicParsing https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.ps1 -OutFile $s; & $s -Repo koda-claw/koda-agent -Version v0.1.7"
 ```
 
 默认安装到 `%LOCALAPPDATA%\koda-agent\bin`。脚本会把该目录加入用户级 `Path`；如果当前终端还找不到命令，打开一个新终端。
@@ -81,7 +81,7 @@ koda-agent resources doctor --json
 
 ```bash
 koda-agent update --repo koda-claw/koda-agent --version latest
-koda-agent update --repo koda-claw/koda-agent --version v0.1.5
+koda-agent update --repo koda-claw/koda-agent --version v0.1.7
 koda-agent update --check
 koda-agent update --check --json
 ```

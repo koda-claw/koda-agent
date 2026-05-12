@@ -24,6 +24,7 @@ use reducer::{LocalCommand, parse_local_command, switch_session};
 use render::summarize_tool_result;
 use render::{
     max_timeline_scroll_for_width, render_app, timeline_content_width, timeline_viewport_lines,
+    trim_chars,
 };
 #[cfg(test)]
 use state::{FocusPane, LayoutMode, Overlay};
@@ -271,6 +272,9 @@ fn submit_active_task(
         return;
     };
     if let Some(session) = state.active_session_mut() {
+        if should_auto_name_session(session) {
+            session.name = prompt_session_title(&prompt);
+        }
         session.status = SessionStatus::Running;
         session.last_error = None;
         session.active_turn = None;
@@ -305,6 +309,31 @@ fn submit_active_task(
             }
         }
     });
+}
+
+fn should_auto_name_session(session: &TuiSessionState) -> bool {
+    session
+        .timeline
+        .iter()
+        .all(|item| matches!(item, TimelineItem::System(_) | TimelineItem::Assistant(_)))
+        && (session.name == "main"
+            || session.name == format!("agent-{}", session.id)
+            || session.name == format!("new-{}", session.id))
+}
+
+fn prompt_session_title(prompt: &str) -> String {
+    let compact = prompt
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|ch: char| ch == '"' || ch == '\'' || ch.is_ascii_punctuation())
+        .to_string();
+    let title = if compact.is_empty() {
+        "untitled".to_string()
+    } else {
+        compact
+    };
+    trim_chars(&title, 32)
 }
 
 fn apply_runtime_event(state: &mut TuiAppState, event: TuiRuntimeEvent) {
@@ -1127,6 +1156,23 @@ mod tests {
                 |item| matches!(item, TimelineItem::System(text) if text.starts_with("done:"))
             )
         );
+    }
+
+    #[test]
+    fn full_tui_auto_names_default_sessions_from_first_prompt() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = test_config(d.path());
+        let mut state = TuiAppState::from_config(&cfg);
+        assert!(should_auto_name_session(state.active_session().unwrap()));
+        assert_eq!(
+            prompt_session_title("  帮我分析 README 和安装脚本\n给出结论  "),
+            "帮我分析 README 和安装脚本 给出结论"
+        );
+
+        let session = state.active_session_mut().unwrap();
+        session.name = prompt_session_title("帮我分析 README 和安装脚本\n给出结论");
+        session.push_timeline(TimelineItem::User("帮我分析 README".into()));
+        assert!(!should_auto_name_session(session));
     }
 
     #[test]

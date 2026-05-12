@@ -199,7 +199,7 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
                 .map(|(id, _)| *id)
                 .or_else(|| state.sessions.keys().next().copied())
             {
-                state.active = next;
+                activate_session(state, next);
             }
         }
         (_, KeyCode::Char('k')) | (_, KeyCode::Up) if state.composer.is_empty() => {
@@ -210,7 +210,7 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
                 .map(|(id, _)| *id)
                 .or_else(|| state.sessions.keys().next_back().copied())
             {
-                state.active = prev;
+                activate_session(state, prev);
             }
         }
         (_, KeyCode::Char(ch))
@@ -239,6 +239,15 @@ pub(super) fn reduce_mouse_event(state: &mut TuiAppState, mouse: MouseEvent) {
     }
 }
 
+fn activate_session(state: &mut TuiAppState, id: usize) {
+    state.active = id;
+    if let Some(session) = state.active_session_mut() {
+        session.unread_events = 0;
+        session.timeline_unseen = 0;
+    }
+    state.status = format!("switched to session #{id}");
+}
+
 fn focus_pane_at(state: &mut TuiAppState, column: u16, row: u16) {
     if let Some(pane) = pane_at(state, column, row) {
         if pane == FocusPane::Sessions {
@@ -258,12 +267,7 @@ fn select_session_at_row(state: &mut TuiAppState, row: u16) {
     let Some(id) = state.sessions.keys().nth(index).copied() else {
         return;
     };
-    state.active = id;
-    if let Some(session) = state.active_session_mut() {
-        session.unread_events = 0;
-        session.timeline_unseen = 0;
-    }
-    state.status = format!("switched to session #{id}");
+    activate_session(state, id);
 }
 
 fn pane_at(state: &TuiAppState, column: u16, row: u16) -> Option<FocusPane> {
@@ -594,8 +598,13 @@ fn close_active_session(state: &mut TuiAppState, runtimes: &mut BTreeMap<usize, 
     }
     state.sessions.remove(&active);
     runtimes.remove(&active);
-    state.active = state.sessions.keys().next().copied().unwrap_or(1);
-    state.status = format!("closed session #{active}; switched to #{}", state.active);
+    let fallback = state.sessions.keys().next().copied().unwrap_or(1);
+    state.active = fallback;
+    if let Some(session) = state.active_session_mut() {
+        session.unread_events = 0;
+        session.timeline_unseen = 0;
+    }
+    state.status = format!("closed session #{active}; switched to #{fallback}");
 }
 
 pub(super) fn switch_session(state: &mut TuiAppState, target: &str) {
@@ -611,11 +620,7 @@ pub(super) fn switch_session(state: &mut TuiAppState, target: &str) {
                 .find_map(|(id, s)| (s.name == target).then_some(*id))
         });
     if let Some(id) = found {
-        state.active = id;
-        if let Some(session) = state.active_session_mut() {
-            session.unread_events = 0;
-        }
-        state.status = format!("switched to session #{id}");
+        activate_session(state, id);
     } else {
         state.status = format!("no session found for {target}");
     }
