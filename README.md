@@ -2,34 +2,67 @@
 
 Rust implementation of GenericAgent-compatible core behavior, aligned to upstream `lsdefine/GenericAgent` commit `9024af7`.
 
+[Chinese README](README.zh.md)
+
 
 ## Install
 
-Source install from this checkout:
+Release install from GitHub Releases. The installer detects the current
+platform, downloads the matching archive, verifies `SHA256SUMS` when available,
+installs the binary, copies packaged resources into `~/.koda-agent/resources`,
+and runs `koda-agent init`.
+
+macOS / Linux:
 
 ```bash
-scripts/install.sh --from-source
+curl -fsSL https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.sh \
+  | KODA_AGENT_REPO=koda-claw/koda-agent sh
 ```
 
-Release install after a GitHub repository is configured:
+Install a specific release tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh \
-  | KODA_AGENT_REPO=<owner>/<repo> sh
+curl -fsSL https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.sh \
+  | KODA_AGENT_REPO=koda-claw/koda-agent KODA_AGENT_VERSION=v0.1.5 sh
 ```
 
 Windows PowerShell:
 
 ```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=$env:TEMP+'\koda-agent-install.ps1'; iwr -UseBasicParsing https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.ps1 -OutFile $s; & $s -Repo koda-claw/koda-agent"
+```
+
+Windows PowerShell with a specific release tag:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=$env:TEMP+'\koda-agent-install.ps1'; iwr -UseBasicParsing https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.ps1 -OutFile $s; & $s -Repo koda-claw/koda-agent -Version v0.1.5"
+```
+
+Source install from this checkout, useful for contributors:
+
+```bash
+scripts/install.sh --from-source
+```
+
+Windows source install from this checkout:
+
+```powershell
 powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -FromSource
 ```
 
-After installation, update directly from GitHub Releases without keeping a
+After installation, open a new terminal if needed, then verify:
+
+```bash
+koda-agent --version
+koda-agent doctor
+```
+
+Later updates can be done directly from GitHub Releases without keeping a
 checkout:
 
 ```bash
 koda-agent update --repo koda-claw/koda-agent --version latest
-koda-agent update --repo koda-claw/koda-agent --version v0.1.0
+koda-agent update --repo koda-claw/koda-agent --version v0.1.5
 koda-agent update --check
 koda-agent update --check --json
 ```
@@ -41,14 +74,15 @@ installed binary, and repairs `~/.koda-agent/resources` by default.
 
 Python helpers are optional. Use `koda-agent bootstrap-python --extras core --repair` only when reflect scripts, OCR, vision helpers, or upstream Python SOPs need Python. See `docs/installation.md`, `docs/configuration.md`, `docs/security.md`, and `docs/browser-extension.md` for install, config, public-repo, and browser bridge guidance.
 
-## 中文文档
+## Chinese Documentation
 
-- 快速开始：`docs/book/src/quickstart.zh.md`
-- CLI 命令手册：`docs/book/src/cli.zh.md`
-- LLM 配置：`docs/book/src/configuration.zh.md`
-- TUI 使用：`docs/book/src/tui.zh.md`
-- Resources 与 Memory：`docs/book/src/resources-memory.zh.md`
-- 发布验收清单：`docs/book/src/release-checklist.zh.md`
+- Chinese README: `README.zh.md`
+- Quick start: `docs/book/src/quickstart.zh.md`
+- CLI manual: `docs/book/src/cli.zh.md`
+- LLM configuration: `docs/book/src/configuration.zh.md`
+- TUI guide: `docs/book/src/tui.zh.md`
+- Resources and Memory: `docs/book/src/resources-memory.zh.md`
+- Release checklist: `docs/book/src/release-checklist.zh.md`
 
 The same files can be rendered as a local tutorial site with mdBook:
 

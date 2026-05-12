@@ -6,11 +6,18 @@ for GenericAgent-compatible Python scripts.
 
 ## macOS and Linux
 
-Release install, once a GitHub repository is configured:
+Release install from the official GitHub repository:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.sh \
-  | KODA_AGENT_REPO=<owner>/<repo> sh
+curl -fsSL https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.sh \
+  | KODA_AGENT_REPO=koda-claw/koda-agent sh
+```
+
+Install a specific release tag:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.sh \
+  | KODA_AGENT_REPO=koda-claw/koda-agent KODA_AGENT_VERSION=v0.1.5 sh
 ```
 
 Source install from a checked-out repository:
@@ -42,10 +49,16 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ## Windows PowerShell
 
-Release install, once a GitHub repository is configured:
+Release install from the official GitHub repository:
 
 ```powershell
-iwr https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install.ps1 -UseB | iex
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=$env:TEMP+'\koda-agent-install.ps1'; iwr -UseBasicParsing https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.ps1 -OutFile $s; & $s -Repo koda-claw/koda-agent"
+```
+
+Install a specific release tag:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=$env:TEMP+'\koda-agent-install.ps1'; iwr -UseBasicParsing https://raw.githubusercontent.com/koda-claw/koda-agent/main/scripts/install.ps1 -OutFile $s; & $s -Repo koda-claw/koda-agent -Version v0.1.5"
 ```
 
 Source install from a checked-out repository:
@@ -151,7 +164,7 @@ because it works without a checked-out repository:
 koda-agent update --check
 koda-agent update --check --json
 koda-agent update --repo koda-claw/koda-agent --version latest
-koda-agent update --repo koda-claw/koda-agent --version v0.1.0
+koda-agent update --repo koda-claw/koda-agent --version v0.1.5
 ```
 
 `--check` queries GitHub's latest release metadata, compares it with the
@@ -184,13 +197,13 @@ The legacy script wrappers are still available and delegate to the installer.
 macOS/Linux script wrapper:
 
 ```bash
-scripts/update.sh --repo <owner>/<repo>
+scripts/update.sh --repo koda-claw/koda-agent
 ```
 
 Windows script wrapper:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/update.ps1 -Repo <owner>/<repo>
+powershell -ExecutionPolicy Bypass -File scripts/update.ps1 -Repo koda-claw/koda-agent
 ```
 
 ## Uninstall
