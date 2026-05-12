@@ -5,6 +5,46 @@ use ratatui::{
 
 use super::render::{summarize_tool_result, trim_chars};
 
+pub(super) fn render_ask_user_card(question: &str, candidates: &[String]) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("? 等待用户确认 ", Style::default().fg(Color::LightYellow)),
+            Span::styled("ask_user", Style::default().fg(Color::White)),
+        ]),
+        Line::styled(
+            format!("  问题: {}", trim_chars(question, 112)),
+            Style::default().fg(Color::White),
+        ),
+    ];
+    if candidates.is_empty() {
+        lines.push(Line::styled(
+            "  候选项: 无；请在 Composer 输入回答后 Enter",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        lines.push(Line::styled(
+            "  候选项（按数字选择，或输入自定义回答）:",
+            Style::default().fg(Color::DarkGray),
+        ));
+        for (idx, candidate) in candidates.iter().take(9).enumerate() {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("    {}. ", idx + 1),
+                    Style::default().fg(Color::LightYellow),
+                ),
+                Span::raw(trim_chars(candidate, 104)),
+            ]));
+        }
+        if candidates.len() > 9 {
+            lines.push(Line::styled(
+                format!("    还有 {} 个候选项，请输入文本选择", candidates.len() - 9),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+    lines
+}
+
 pub(super) fn render_tool_call_card(name: &str, args: &str) -> Vec<Line<'static>> {
     let parsed = parse_json(args);
     let icon = tool_icon(name);
@@ -55,8 +95,9 @@ pub(super) fn render_tool_call_card(name: &str, args: &str) -> Vec<Line<'static>
             json_preview(&parsed, "content", 52).unwrap_or_else(|| "<来自回复代码块>".into())
         ),
         "web_scan" => format!(
-            "{icon} 扫描浏览器 | tab={} tabs_only={} text_only={} cutlist={}",
+            "{icon} 扫描浏览器 | tab={} url={} tabs_only={} text_only={} cutlist={}",
             json_str(&parsed, "switch_tab_id").unwrap_or("当前"),
+            json_str(&parsed, "url").unwrap_or("-"),
             json_bool(&parsed, "tabs_only").unwrap_or(false),
             json_bool(&parsed, "text_only").unwrap_or(false),
             json_bool(&parsed, "cutlist").unwrap_or(false)

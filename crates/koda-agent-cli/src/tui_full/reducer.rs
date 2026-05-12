@@ -9,8 +9,8 @@ use super::render::{
     max_timeline_scroll_for_width, timeline_content_width, timeline_viewport_lines, trim_chars,
 };
 use super::state::{
-    FocusPane, Overlay, SessionStatus, StreamMetrics, StreamState, ThinkingState, TimelineItem,
-    TuiAppState, TuiSessionState, UsageStats,
+    FocusPane, Overlay, PendingAsk, SessionStatus, StreamMetrics, StreamState, ThinkingState,
+    TimelineItem, TuiAppState, TuiSessionState, UsageStats,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -31,6 +31,7 @@ pub(super) enum LocalCommand {
     Close,
     Commands,
     Help,
+    CancelAsk,
     Rename(String),
     Sessions,
     Switch(String),
@@ -119,10 +120,22 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
         (_, KeyCode::Enter) => {
             let prompt = state.composer.trim().to_string();
             if prompt.is_empty() {
-                state.status = "composer is empty".into();
+                if active_pending_ask(state).is_some() {
+                    state.status = "请输入回答，或按数字选择候选项".into();
+                } else {
+                    state.status = "composer is empty".into();
+                }
+            } else if let Some(answer) = parse_pending_ask_prompt(state, &prompt) {
+                state.composer.clear();
+                clear_active_pending_ask(state);
+                return KeyAction::Submit(answer);
             } else if let Some(command) = parse_local_command(&prompt) {
                 state.composer.clear();
                 return KeyAction::Local(command);
+            } else if active_pending_ask(state).is_some() && prompt.starts_with('/') {
+                state.status =
+                    "ask_user command not recognized; use /answer <text>, /choose <n>, or /cancel"
+                        .into();
             } else if state
                 .active_session()
                 .is_some_and(|s| matches!(s.status, SessionStatus::Running))
@@ -130,6 +143,7 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
                 state.status = format!("session #{} is already running", state.active);
             } else {
                 state.composer.clear();
+                clear_active_pending_ask(state);
                 return KeyAction::Submit(prompt);
             }
         }
@@ -146,6 +160,12 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
         }
         (_, KeyCode::Char('q')) if state.composer.is_empty() => return KeyAction::Quit,
         (_, KeyCode::Char('n')) if state.composer.is_empty() => return KeyAction::NewSession,
+        (_, KeyCode::Char(ch)) if state.composer.is_empty() && ch.is_ascii_digit() => {
+            if let Some(answer) = pending_ask_choice(state, ch) {
+                clear_active_pending_ask(state);
+                return KeyAction::Submit(answer);
+            }
+        }
         (_, KeyCode::PageDown) => {
             scroll_active_timeline(state, 10);
         }
@@ -337,6 +357,7 @@ pub(super) fn parse_local_command(input: &str) -> Option<LocalCommand> {
         )),
         "/clear" => Some(LocalCommand::Clear),
         "/close" => Some(LocalCommand::Close),
+        "/cancel" => Some(LocalCommand::CancelAsk),
         "/commands" | "/palette" => Some(LocalCommand::Commands),
         "/help" => Some(LocalCommand::Help),
         "/rename" if !arg.is_empty() => Some(LocalCommand::Rename(arg.to_string())),
@@ -365,6 +386,7 @@ pub(super) fn apply_local_command(
                 session.last_error = None;
                 session.active_turn = None;
                 session.last_tool = None;
+                session.pending_ask = None;
                 session.usage = UsageStats::default();
                 session.stream_state = StreamState::Idle;
                 session.thinking_state = ThinkingState::Unavailable;
@@ -373,6 +395,21 @@ pub(super) fn apply_local_command(
                 session.last_notice = Some("timeline cleared".into());
                 session.push_timeline(TimelineItem::System("Timeline cleared.".into()));
                 state.status = format!("cleared session #{}", state.active);
+            }
+            Ok(())
+        }
+        LocalCommand::CancelAsk => {
+            if let Some(session) = state.active_session_mut() {
+                if session.pending_ask.take().is_some() {
+                    session.status = SessionStatus::Idle;
+                    session.last_notice = Some("ask_user cancelled".into());
+                    session
+                        .push_timeline(TimelineItem::System("已取消当前 ask_user 等待。".into()));
+                    state.status =
+                        format!("cancelled pending ask_user for session #{}", state.active);
+                } else {
+                    state.status = "no pending ask_user to cancel".into();
+                }
             }
             Ok(())
         }
@@ -471,6 +508,7 @@ fn branch_active_session(
             last_error: None,
             active_turn: None,
             last_tool: old.last_tool.clone(),
+            pending_ask: old.pending_ask.clone(),
             unread_events: 0,
             completed_tasks: old.completed_tasks,
             failed_tasks: old.failed_tasks,
@@ -495,6 +533,53 @@ fn branch_active_session(
     state.active = id;
     state.status = format!("branched session #{active} -> #{id}");
     Ok(())
+}
+
+fn active_pending_ask(state: &TuiAppState) -> Option<&PendingAsk> {
+    state
+        .active_session()
+        .and_then(|session| session.pending_ask.as_ref())
+}
+
+fn clear_active_pending_ask(state: &mut TuiAppState) {
+    if let Some(session) = state.active_session_mut() {
+        session.pending_ask = None;
+    }
+}
+
+fn parse_pending_ask_prompt(state: &TuiAppState, prompt: &str) -> Option<String> {
+    let ask = active_pending_ask(state)?;
+    let trimmed = prompt.trim();
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    match parts
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "/answer" => {
+            let answer = parts.next().unwrap_or_default().trim();
+            (!answer.is_empty()).then(|| answer.to_string())
+        }
+        "/choose" => parts
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| ask.candidates.get(n.saturating_sub(1)).cloned()),
+        _ if trimmed.starts_with('/') => None,
+        _ => Some(trimmed.to_string()),
+    }
+}
+
+fn pending_ask_choice(state: &TuiAppState, ch: char) -> Option<String> {
+    let ask = active_pending_ask(state)?;
+    let idx = ch.to_digit(10)? as usize;
+    if idx == 0 {
+        return None;
+    }
+    ask.candidates.get(idx - 1).cloned()
 }
 
 fn close_active_session(state: &mut TuiAppState, runtimes: &mut BTreeMap<usize, AgentRuntime>) {

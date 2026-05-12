@@ -15,7 +15,7 @@ use super::state::{
     AppLayout, FocusPane, LayoutMode, Overlay, SessionStatus, TimelineItem, TimelineRenderCache,
     TimelineSignature, ToolDetail, TuiAppState, TuiSessionState,
 };
-use super::tool_cards::{render_tool_call_card, render_tool_result_card};
+use super::tool_cards::{render_ask_user_card, render_tool_call_card, render_tool_result_card};
 
 fn compute_layout(area: Rect) -> AppLayout {
     let vertical = Layout::default()
@@ -141,6 +141,8 @@ fn render_sessions(frame: &mut Frame<'_>, area: Rect, state: &TuiAppState) {
             };
             let activity = if matches!(session.status, SessionStatus::Running) {
                 format!(" t{}", session.active_turn.unwrap_or_default())
+            } else if let Some(ask) = session.pending_ask.as_ref() {
+                format!(" !{}", ask.candidates.len())
             } else {
                 unread
             };
@@ -260,6 +262,10 @@ fn timeline_signature(session: &TuiSessionState) -> TimelineSignature {
             | TimelineItem::Error(text) => text.len(),
             TimelineItem::ToolCall { name, args } => name.len() + args.len(),
             TimelineItem::ToolResult { name, args, data } => name.len() + args.len() + data.len(),
+            TimelineItem::AskUser {
+                question,
+                candidates,
+            } => question.len() + candidates.iter().map(String::len).sum::<usize>(),
         })
         .sum();
     TimelineSignature {
@@ -303,6 +309,12 @@ fn timeline_lines(session: &TuiSessionState) -> Vec<Line<'static>> {
             }
             TimelineItem::ToolResult { name, args, data } => {
                 lines.extend(render_tool_result_card(name, args, data, session.fold));
+            }
+            TimelineItem::AskUser {
+                question,
+                candidates,
+            } => {
+                lines.extend(render_ask_user_card(question, candidates));
             }
             TimelineItem::System(text) => {
                 lines.push(Line::from(vec![
@@ -442,10 +454,58 @@ fn inspector_lines(state: &TuiAppState) -> Vec<Line<'static>> {
         lines.extend(tool_lines(tool));
         lines.push(Line::raw(""));
     }
+    if let Some(ask) = active.and_then(|s| s.pending_ask.as_ref()) {
+        lines.extend(ask_user_lines(ask, state.tick));
+        lines.push(Line::raw(""));
+    }
     lines.extend([
         Line::styled("提示 Hint", Style::default().fg(Color::LightBlue)),
-        Line::raw("F7/Ctrl-M 切换交互/复制模式；复制模式下可直接选中文字"),
+        if active.and_then(|s| s.pending_ask.as_ref()).is_some() {
+            Line::raw("等待 ask_user：按 1-9 选择，或输入回答后 Enter；/cancel 取消")
+        } else {
+            Line::raw("F7/Ctrl-M 切换交互/复制模式；复制模式下可直接选中文字")
+        },
     ]);
+    lines
+}
+
+fn ask_user_lines(ask: &super::state::PendingAsk, tick: u64) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::styled(
+            "等待用户确认 Ask User",
+            Style::default()
+                .fg(Color::LightYellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from(vec![
+            Span::styled("位置 ", Style::default().fg(Color::DarkGray)),
+            Span::raw(format!("#{}.{}", ask.turn, ask.index)),
+            Span::raw("  "),
+            Span::styled("等待 ", Style::default().fg(Color::DarkGray)),
+            Span::raw(format!("{}t", tick.saturating_sub(ask.created_tick))),
+        ]),
+    ];
+    lines.extend(section_lines("问题", &ask.question, Color::White));
+    if ask.candidates.is_empty() {
+        lines.push(Line::styled(
+            "候选项: 无，请在 Composer 输入自由回答",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        lines.push(Line::styled(
+            "候选项:",
+            Style::default().fg(Color::DarkGray),
+        ));
+        for (idx, candidate) in ask.candidates.iter().take(9).enumerate() {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {}. ", idx + 1),
+                    Style::default().fg(Color::LightYellow),
+                ),
+                Span::raw(trim_chars(candidate, 42)),
+            ]));
+        }
+    }
     lines
 }
 
@@ -486,6 +546,31 @@ fn tool_lines(tool: &ToolDetail) -> Vec<Line<'static>> {
             ),
         ]),
     ]
+}
+
+fn section_lines(title: &str, text: &str, color: Color) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::styled(
+        format!("{title}:"),
+        Style::default().fg(Color::DarkGray),
+    )];
+    let mut body = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .peekable();
+    if body.peek().is_none() {
+        lines.push(Line::styled(
+            "  <empty>",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        lines.extend(body.take(4).map(|line| {
+            Line::styled(
+                format!("  {}", trim_chars(line.trim(), 44)),
+                Style::default().fg(color),
+            )
+        }));
+    }
+    lines
 }
 
 fn tool_arg_summary(name: &str, args: &str) -> String {
@@ -666,6 +751,21 @@ fn session_lines(active: Option<&TuiSessionState>) -> Vec<Line<'static>> {
                 },
             ),
         ]),
+        Line::from(vec![
+            Span::styled("交互 ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                session
+                    .pending_ask
+                    .as_ref()
+                    .map(|ask| format!("ask_user 等待中({})", ask.candidates.len()))
+                    .unwrap_or_else(|| "无".into()),
+                if session.pending_ask.is_some() {
+                    Style::default().fg(Color::LightYellow)
+                } else {
+                    Style::default().fg(Color::Gray)
+                },
+            ),
+        ]),
         Line::raw(format!(
             "最近: {}",
             session
@@ -691,11 +791,29 @@ fn format_compact_u64(value: u64) -> String {
 fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &TuiAppState) {
     let mut lines = Vec::new();
     let width = area.width.saturating_sub(4) as usize;
+    let pending_ask = state
+        .active_session()
+        .and_then(|session| session.pending_ask.as_ref());
     if state.composer.is_empty() {
-        lines.push(Line::styled(
-            "Ask Koda Agent... (Enter submit, Ctrl-J newline)",
-            Style::default().fg(Color::DarkGray),
-        ));
+        if let Some(ask) = pending_ask {
+            let prompt = if ask.candidates.is_empty() {
+                "请输入 ask_user 回答后 Enter；/cancel 取消".to_string()
+            } else {
+                format!(
+                    "按 1-{} 选择候选项，或输入自定义回答后 Enter；/cancel 取消",
+                    ask.candidates.len().min(9)
+                )
+            };
+            lines.push(Line::styled(
+                prompt,
+                Style::default().fg(Color::LightYellow),
+            ));
+        } else {
+            lines.push(Line::styled(
+                "Ask Koda Agent... (Enter submit, Ctrl-J newline)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
     } else {
         let composer_lines = state.composer.lines().collect::<Vec<_>>();
         let start = composer_lines.len().saturating_sub(3);
@@ -710,7 +828,11 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &TuiAppState) {
     frame.render_widget(
         Paragraph::new(lines)
             .block(focused_block(
-                "输入 Composer",
+                if pending_ask.is_some() {
+                    "回答 ask_user"
+                } else {
+                    "输入 Composer"
+                },
                 state.focus == FocusPane::Composer,
             ))
             .wrap(Wrap { trim: false }),

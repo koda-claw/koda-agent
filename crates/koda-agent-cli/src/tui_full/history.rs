@@ -100,6 +100,7 @@ fn history_session_to_tui(raw: RawSessionFile, id: usize) -> LoadedHistorySessio
             last_error: None,
             active_turn: None,
             last_tool: None,
+            pending_ask: None,
             unread_events: 0,
             completed_tasks: 0,
             failed_tasks: 0,

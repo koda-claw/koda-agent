@@ -73,6 +73,7 @@ impl TuiAppState {
                 last_error: None,
                 active_turn: None,
                 last_tool: None,
+                pending_ask: None,
                 unread_events: 0,
                 completed_tasks: 0,
                 failed_tasks: 0,
@@ -134,6 +135,7 @@ impl TuiAppState {
                 last_error: None,
                 active_turn: None,
                 last_tool: None,
+                pending_ask: None,
                 unread_events: 0,
                 completed_tasks: 0,
                 failed_tasks: 0,
@@ -171,6 +173,7 @@ pub(super) struct TuiSessionState {
     pub(super) last_error: Option<String>,
     pub(super) active_turn: Option<usize>,
     pub(super) last_tool: Option<ToolDetail>,
+    pub(super) pending_ask: Option<PendingAsk>,
     pub(super) unread_events: u32,
     pub(super) completed_tasks: u32,
     pub(super) failed_tasks: u32,
@@ -280,10 +283,20 @@ pub(super) struct ToolDetail {
     pub(super) result: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PendingAsk {
+    pub(super) turn: usize,
+    pub(super) index: usize,
+    pub(super) question: String,
+    pub(super) candidates: Vec<String>,
+    pub(super) created_tick: u64,
+}
+
 #[derive(Clone, Debug)]
 pub(super) enum SessionStatus {
     Idle,
     Running,
+    WaitingUser,
     Error,
 }
 
@@ -292,6 +305,7 @@ impl SessionStatus {
         match self {
             Self::Idle => "idle",
             Self::Running => "running",
+            Self::WaitingUser => "waiting",
             Self::Error => "error",
         }
     }
@@ -301,6 +315,9 @@ impl SessionStatus {
             Self::Idle => Style::default().fg(Color::Gray),
             Self::Running => Style::default()
                 .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+            Self::WaitingUser => Style::default()
+                .fg(Color::LightYellow)
                 .add_modifier(Modifier::BOLD),
             Self::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         }
@@ -320,6 +337,10 @@ pub(super) enum TimelineItem {
         name: String,
         args: String,
         data: String,
+    },
+    AskUser {
+        question: String,
+        candidates: Vec<String>,
     },
     System(String),
     Error(String),

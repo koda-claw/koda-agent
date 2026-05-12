@@ -28,7 +28,7 @@ use render::{
 #[cfg(test)]
 use state::{FocusPane, LayoutMode, Overlay};
 use state::{
-    SessionStatus, StreamState, ThinkingState, TimelineItem, ToolDetail, TuiAppState,
+    PendingAsk, SessionStatus, StreamState, ThinkingState, TimelineItem, ToolDetail, TuiAppState,
     TuiSessionState,
 };
 use std::{
@@ -346,6 +346,28 @@ fn apply_runtime_event(state: &mut TuiAppState, event: TuiRuntimeEvent) {
             let viewport = timeline_viewport_lines(state);
             let width = timeline_content_width(state);
             if let Some(session) = state.sessions.get_mut(&session_id) {
+                if session.pending_ask.is_some() {
+                    session.status = SessionStatus::WaitingUser;
+                    session.active_turn = None;
+                    session.last_notice = Some("waiting for ask_user answer".into());
+                    if session.usage.current_turn.is_none()
+                        && let Some(usage) = usage
+                    {
+                        apply_usage(session, usage);
+                    }
+                    if session.usage.current_turn.is_none() {
+                        session.usage.unavailable = true;
+                    }
+                    reconcile_session_timeline_scroll(session, viewport, width, is_active);
+                    if is_active {
+                        state.status =
+                            format!("session #{session_id}: waiting for ask_user answer");
+                    } else {
+                        session.unread_events = session.unread_events.saturating_add(1);
+                        state.status = format!("background session #{session_id} waiting user");
+                    }
+                    return;
+                }
                 session.status = SessionStatus::Idle;
                 if matches!(session.stream_state, StreamState::Idle) {
                     session.stream_state = StreamState::FinalOnly;
@@ -469,11 +491,23 @@ fn apply_agent_event(session: &mut TuiSessionState, event: &AgentEvent, tick: u6
                 args: args.clone(),
                 result: Some(data.to_string()),
             });
-            session.push_timeline(TimelineItem::ToolResult {
-                name: name.clone(),
-                args,
-                data: data.to_string(),
-            });
+            if name == "ask_user"
+                && let Some(pending) = pending_ask_from_tool_result(*turn, *index, data, tick)
+            {
+                session.pending_ask = Some(pending.clone());
+                session.status = SessionStatus::WaitingUser;
+                session.last_notice = Some("ask_user waiting for answer".into());
+                session.push_timeline(TimelineItem::AskUser {
+                    question: pending.question,
+                    candidates: pending.candidates,
+                });
+            } else {
+                session.push_timeline(TimelineItem::ToolResult {
+                    name: name.clone(),
+                    args,
+                    data: data.to_string(),
+                });
+            }
         }
         AgentEvent::TurnFinished { stop_reason, .. } => {
             session.active_turn = None;
@@ -483,9 +517,52 @@ fn apply_agent_event(session: &mut TuiSessionState, event: &AgentEvent, tick: u6
         }
         AgentEvent::Stopped => {
             session.active_turn = None;
+            session.pending_ask = None;
             session.push_timeline(TimelineItem::System("stopped".into()));
         }
     }
+}
+
+fn pending_ask_from_tool_result(
+    turn: usize,
+    index: usize,
+    data: &serde_json::Value,
+    tick: u64,
+) -> Option<PendingAsk> {
+    if data.get("status").and_then(serde_json::Value::as_str) != Some("INTERRUPT")
+        || data.get("intent").and_then(serde_json::Value::as_str) != Some("HUMAN_INTERVENTION")
+    {
+        return None;
+    }
+    let payload = data.get("data")?;
+    let question = payload
+        .get("question")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("请提供输入：")
+        .trim();
+    let candidates = payload
+        .get("candidates")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::trim))
+                .filter(|item| !item.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some(PendingAsk {
+        turn,
+        index,
+        question: if question.is_empty() {
+            "请提供输入：".into()
+        } else {
+            question.to_string()
+        },
+        candidates,
+        created_tick: tick,
+    })
 }
 
 fn apply_usage(session: &mut TuiSessionState, usage: koda_agent_core::LlmUsageSummary) {
@@ -581,6 +658,7 @@ fn short_event_label(event: &AgentEvent) -> &'static str {
         AgentEvent::ThinkingMessage { .. } => "thinking",
         AgentEvent::ThinkingMessageDelta { .. } => "thinking streaming",
         AgentEvent::ToolStarted { .. } => "tool started",
+        AgentEvent::ToolFinished { name, .. } if name == "ask_user" => "waiting user",
         AgentEvent::ToolFinished { .. } => "tool finished",
         AgentEvent::TurnFinished { .. } => "turn finished",
         AgentEvent::LlmUsage { .. } => "usage",
@@ -1317,6 +1395,145 @@ mod tests {
             ),
             KeyAction::Quit
         );
+    }
+
+    #[test]
+    fn full_tui_ask_user_enters_waiting_state_and_renders_choices() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = test_config(d.path());
+        let mut state = TuiAppState::from_config(&cfg);
+        apply_runtime_event(
+            &mut state,
+            TuiRuntimeEvent::Agent {
+                session_id: 1,
+                event: AgentEvent::ToolStarted {
+                    turn: 3,
+                    index: 1,
+                    name: "ask_user".into(),
+                    args: serde_json::json!({
+                        "question":"是否继续执行发布？",
+                        "candidates":["继续","暂停","停止"]
+                    }),
+                },
+            },
+        );
+        apply_runtime_event(
+            &mut state,
+            TuiRuntimeEvent::Agent {
+                session_id: 1,
+                event: AgentEvent::ToolFinished {
+                    turn: 3,
+                    index: 1,
+                    name: "ask_user".into(),
+                    data: serde_json::json!({
+                        "status":"INTERRUPT",
+                        "intent":"HUMAN_INTERVENTION",
+                        "data":{
+                            "question":"是否继续执行发布？",
+                            "candidates":["继续","暂停","停止"]
+                        }
+                    }),
+                },
+            },
+        );
+
+        let session = state.active_session().unwrap();
+        assert!(matches!(session.status, SessionStatus::WaitingUser));
+        assert_eq!(session.pending_ask.as_ref().unwrap().candidates.len(), 3);
+        assert!(
+            session
+                .timeline
+                .iter()
+                .any(|item| matches!(item, TimelineItem::AskUser { question, .. } if question.contains("继续执行发布")))
+        );
+
+        apply_runtime_event(
+            &mut state,
+            TuiRuntimeEvent::Done {
+                session_id: 1,
+                usage: None,
+            },
+        );
+        let session = state.active_session().unwrap();
+        assert!(matches!(session.status, SessionStatus::WaitingUser));
+        assert_eq!(session.completed_tasks, 0);
+
+        let output = render_to_string(160, 50, &mut state);
+        let compact_output = output.replace(' ', "");
+        assert!(compact_output.contains("等待用户确认"));
+        assert!(compact_output.contains("是否继续执行发布"));
+        assert!(compact_output.contains("1.继续"));
+        assert!(compact_output.contains("回答ask_user"));
+    }
+
+    #[test]
+    fn full_tui_ask_user_numeric_and_text_answers_submit_same_session() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = test_config(d.path());
+        let mut state = TuiAppState::from_config(&cfg);
+        state.active_session_mut().unwrap().pending_ask = Some(PendingAsk {
+            turn: 1,
+            index: 0,
+            question: "下一步？".into(),
+            candidates: vec!["继续".into(), "停止".into()],
+            created_tick: 0,
+        });
+        state.active_session_mut().unwrap().status = SessionStatus::WaitingUser;
+
+        assert_eq!(
+            reduce_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE)
+            ),
+            KeyAction::Submit("停止".into())
+        );
+        assert!(state.active_session().unwrap().pending_ask.is_none());
+
+        state.active_session_mut().unwrap().pending_ask = Some(PendingAsk {
+            turn: 2,
+            index: 0,
+            question: "补充说明？".into(),
+            candidates: vec![],
+            created_tick: 0,
+        });
+        state.active_session_mut().unwrap().status = SessionStatus::WaitingUser;
+        state.composer = "/answer 使用更保守的方案".into();
+        assert_eq!(
+            reduce_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+            ),
+            KeyAction::Submit("使用更保守的方案".into())
+        );
+        assert!(state.active_session().unwrap().pending_ask.is_none());
+    }
+
+    #[test]
+    fn full_tui_ask_user_cancel_clears_waiting_state() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = test_config(d.path());
+        let mut state = TuiAppState::from_config(&cfg);
+        state.active_session_mut().unwrap().pending_ask = Some(PendingAsk {
+            turn: 1,
+            index: 0,
+            question: "是否继续？".into(),
+            candidates: vec!["继续".into()],
+            created_tick: 0,
+        });
+        state.active_session_mut().unwrap().status = SessionStatus::WaitingUser;
+        state.composer = "/cancel".into();
+        assert_eq!(
+            reduce_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+            ),
+            KeyAction::Local(LocalCommand::CancelAsk)
+        );
+        let mut runtimes = BTreeMap::new();
+        apply_local_command(&mut state, &mut runtimes, LocalCommand::CancelAsk, &cfg).unwrap();
+        let session = state.active_session().unwrap();
+        assert!(session.pending_ask.is_none());
+        assert!(matches!(session.status, SessionStatus::Idle));
     }
 
     #[test]
