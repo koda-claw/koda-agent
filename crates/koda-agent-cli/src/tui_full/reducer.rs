@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use koda_agent_core::{AgentConfig, AgentRuntime};
 use ratatui::layout::Rect;
 use std::collections::BTreeMap;
@@ -20,7 +20,6 @@ pub(super) enum KeyAction {
     Submit(String),
     NewSession,
     Abort,
-    ToggleMouseCapture,
     Local(LocalCommand),
 }
 
@@ -38,6 +37,10 @@ pub(super) enum LocalCommand {
 }
 
 pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAction {
+    // Ignore key release events to prevent double-input on Windows.
+    if key.kind == KeyEventKind::Release {
+        return KeyAction::None;
+    }
     if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('q') {
         return KeyAction::Quit;
     }
@@ -93,14 +96,8 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
         (_, KeyCode::F(6)) if state.composer.is_empty() => {
             return KeyAction::Local(LocalCommand::Close);
         }
-        (_, KeyCode::F(7)) if state.composer.is_empty() => {
-            return KeyAction::ToggleMouseCapture;
-        }
         (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
             return KeyAction::Abort;
-        }
-        (KeyModifiers::CONTROL, KeyCode::Char('m')) if state.composer.is_empty() => {
-            return KeyAction::ToggleMouseCapture;
         }
         (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
             state.composer.push('\n');

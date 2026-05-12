@@ -44,7 +44,7 @@ use tokio::sync::mpsc;
 use tool_cards::{render_tool_call_card, render_tool_result_card};
 
 #[cfg(test)]
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseEvent, MouseEventKind};
 
 const MAX_TIMELINE_ITEMS: usize = 2_000;
 const MAX_RUNTIME_EVENTS_PER_FRAME: usize = 1;
@@ -122,6 +122,13 @@ async fn run_event_loop(
     let mut last_tick = Instant::now();
     let mut last_runtime_drain = Instant::now() - MIN_STREAM_FRAME;
     terminal.draw(|frame| render_app(frame, state))?;
+
+    // Drain any buffered terminal events (e.g. on macOS after entering raw mode)
+    // to prevent the first real key event from being consumed by stale data.
+    while event::poll(Duration::ZERO)? {
+        event::read()?;
+    }
+
     loop {
         let mut dirty = false;
         let runtime_budget = if last_runtime_drain.elapsed() >= MIN_STREAM_FRAME {
@@ -190,9 +197,6 @@ fn handle_terminal_event(
                     state.status = format!("stop requested for session #{}", state.active);
                 }
             }
-            KeyAction::ToggleMouseCapture => {
-                toggle_mouse_capture(state)?;
-            }
             KeyAction::None => {}
         },
         Event::Mouse(mouse) => reduce_mouse_event(state, mouse),
@@ -237,20 +241,6 @@ fn reset_terminal_mouse_modes() {
     let _ = out.flush();
 }
 
-fn toggle_mouse_capture(state: &mut TuiAppState) -> Result<()> {
-    if state.mouse_capture {
-        execute!(io::stdout(), DisableMouseCapture).context("disable mouse capture")?;
-        reset_terminal_mouse_modes();
-        state.mouse_capture = false;
-        state.status =
-            "复制模式：可直接选中/复制文字；Timeline 鼠标滚轮暂停，F7/Ctrl-M 恢复滚轮/点击".into();
-    } else {
-        execute!(io::stdout(), EnableMouseCapture).context("enable mouse capture")?;
-        state.mouse_capture = true;
-        state.status = "交互模式：Timeline 支持点击/滚轮；需要复制文字时按 F7/Ctrl-M".into();
-    }
-    Ok(())
-}
 
 #[derive(Debug)]
 enum TuiRuntimeEvent {
@@ -1573,6 +1563,64 @@ mod tests {
             KeyAction::None
         );
         assert_eq!(state.composer, "x");
+    }
+
+    #[test]
+    fn full_tui_reducer_ignores_release_events() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = test_config(d.path());
+        let mut state = TuiAppState::from_config(&cfg);
+        state.focus = FocusPane::Composer;
+
+        // A Release event for a character should not enter it into the composer.
+        let release_h = KeyEvent {
+            code: KeyCode::Char('h'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Release,
+            state: KeyEventState::NONE,
+        };
+        assert_eq!(reduce_key_event(&mut state, release_h), KeyAction::None);
+        assert!(state.composer.is_empty());
+
+        // A Release of Enter should not submit empty composer.
+        let release_enter = KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Release,
+            state: KeyEventState::NONE,
+        };
+        assert_eq!(reduce_key_event(&mut state, release_enter), KeyAction::None);
+        assert_eq!(state.composer, "");
+
+        // A Release of Backspace should not pop an already-empty composer.
+        let release_bs = KeyEvent {
+            code: KeyCode::Backspace,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Release,
+            state: KeyEventState::NONE,
+        };
+        assert_eq!(reduce_key_event(&mut state, release_bs), KeyAction::None);
+
+        // Press events should still work.
+        state.composer.clear();
+        let press_h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+        assert_eq!(reduce_key_event(&mut state, press_h), KeyAction::None);
+        assert_eq!(state.composer, "h");
+
+        // Release of Ctrl-Q should not quit (only Press quits).
+        state.composer.clear();
+        let release_q = KeyEvent {
+            code: KeyCode::Char('q'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Release,
+            state: KeyEventState::NONE,
+        };
+        assert_eq!(reduce_key_event(&mut state, release_q), KeyAction::None);
+        // Press 'q' on empty composer still quits.
+        assert_eq!(
+            reduce_key_event(&mut state, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            KeyAction::Quit
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@ use ratatui::{
         ScrollbarState, Wrap,
     },
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::markdown::render_markdown_lines;
 use super::state::{
@@ -412,10 +412,9 @@ fn inspector_lines(state: &TuiAppState) -> Vec<Line<'static>> {
         )),
         Line::raw(format!("模型 {}", trim_chars(&state.model_label, 28))),
         Line::raw(format!(
-            "API {}  stream:{}  mouse:{}",
+            "API {}  stream:{}",
             state.api_mode,
             if state.stream_enabled { "on" } else { "off" },
-            if state.mouse_capture { "on" } else { "off" }
         )),
         Line::raw(format!(
             "渲染 {}  Thinking {}",
@@ -463,7 +462,7 @@ fn inspector_lines(state: &TuiAppState) -> Vec<Line<'static>> {
         if active.and_then(|s| s.pending_ask.as_ref()).is_some() {
             Line::raw("等待 ask_user：按 1-9 选择，或输入回答后 Enter；/cancel 取消")
         } else {
-            Line::raw("F7/Ctrl-M 切换交互/复制模式；复制模式下可直接选中文字")
+            Line::raw("按住 Shift 选中文字即可复制（iTerm2/Kitty/WezTerm/Windows Terminal）")
         },
     ]);
     lines
@@ -838,6 +837,20 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &TuiAppState) {
             .wrap(Wrap { trim: false }),
         area,
     );
+
+    // Position the terminal cursor inside the composer text area.
+    if state.focus == FocusPane::Composer {
+        let text_line_count = if state.composer.is_empty() {
+            1usize
+        } else {
+            state.composer.lines().count()
+        };
+        let visible_text_lines = text_line_count.min(3);
+        let line_idx = visible_text_lines.saturating_sub(1) as u16;
+        let last_line = state.composer.lines().last().unwrap_or("");
+        let col = UnicodeWidthStr::width(last_line).min(width) as u16;
+        frame.set_cursor_position((area.x + 1 + col, area.y + 1 + line_idx));
+    }
 }
 
 fn render_overlay(frame: &mut Frame<'_>, state: &TuiAppState) {
@@ -886,7 +899,7 @@ fn help_lines() -> Vec<Line<'static>> {
         Line::styled("导航 Navigation", Style::default().fg(Color::LightBlue)),
         Line::raw("Tab focus | j/k or Up/Down switch sessions when composer is empty"),
         Line::raw("PageUp/PageDown scroll timeline | Home reset timeline scroll"),
-        Line::raw("F7/Ctrl-M toggle interactive/copy mode; copy mode allows text selection"),
+        Line::raw("Hold Shift to select and copy text (most terminals bypass mouse capture)"),
         Line::raw(""),
         Line::styled("输入 Composer", Style::default().fg(Color::LightBlue)),
         Line::raw("Enter submit | Ctrl-J newline | Backspace delete | Ctrl-S stop"),
@@ -934,10 +947,9 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, state: &TuiAppState) {
             Span::styled(" ", Style::default().bg(Color::DarkGray)),
             Span::raw(&state.status),
             Span::raw(format!(
-                " | {:?} | stream:{} | mouse:{}",
+                " | {:?} | stream:{}",
                 state.layout_mode,
                 if state.stream_enabled { "on" } else { "off" },
-                if state.mouse_capture { "on" } else { "off" }
             )),
         ])),
         area,

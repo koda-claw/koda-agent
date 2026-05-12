@@ -6995,6 +6995,15 @@ id = "mimo-v2.5-pro"
 
     #[test]
     fn config_migrate_imports_legacy_openai_and_copies_key_to_home_env() {
+        // Save and clear interfering process env vars so that
+        // env_value_available_any falls through to the .env file on disk.
+        let saved: Vec<_> = ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_STYLE"]
+            .iter()
+            .map(|k| (k, std::env::var(k).ok()))
+            .collect();
+        for (k, _) in &saved {
+            unsafe { std::env::remove_var(k) };
+        }
         let d = tempfile::tempdir().unwrap();
         let root = d.path().join("workspace");
         let home = d.path().join("home");
@@ -7024,6 +7033,11 @@ id = "mimo-v2.5-pro"
         assert!(env_text.contains("KODA_LLM_MODEL=default"));
         assert!(env_text.contains("OPENAI_API_KEY=sk-legacy"));
         assert!(run_config_migrate(&root, &paths, "openai-compat", false, true, true).is_err());
+        for (k, v) in saved {
+            if let Some(v) = v {
+                unsafe { std::env::set_var(k, v) };
+            }
+        }
     }
 
     #[test]
