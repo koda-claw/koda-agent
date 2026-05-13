@@ -177,7 +177,7 @@ Remaining priority:
 
 1. ACP interoperability with an actual codeg/ACP host beyond the local JSONL client smoke.
 2. TUI mouse/full-screen Textual-like rendering and concurrent live session display.
-3. ~~Telegram streaming edit, inline buttons, file/image support.~~ **Done** (65 tests, Phases A-E commits). Remaining: Feishu/WeCom/DingTalk encrypted callback + file/reply parity.
+3. ~~Telegram streaming edit, inline buttons, file/image support.~~ **Done** (51 tests, Phases A-E, pure text output). Remaining: Feishu/WeCom/DingTalk encrypted callback + file/reply parity.
 4. Feishu/WeCom/DingTalk encrypted callback + file/reply parity (next IM target).
 5. QQ/WeChat/native desktop/Qt/Streamlit/desktop pet feature-gated ports.
 
@@ -185,7 +185,7 @@ Remaining priority:
 
 1. ~~Extend Phase 5 from automated matrix into selected real-site manual cases: provider-specific autofill/password-manager prompts, download shelf UI behavior, and complex cross-origin iframe workflows.~~ **Phase 2 LLM core parity is now Done/P1** with profile-based configuration completed.
 2. Add ACP protocol fixture comparison and improve TUI layout/session display.
-3. ~~Continue IM/frontend breadth: Telegram streaming/buttons/files, Feishu/WeCom/DingTalk encrypted callbacks and files.~~ **Telegram Done** (Phases A-E, 65 tests). Next: Feishu/WeCom/DingTalk encrypted callbacks and file parity.
+3. ~~Continue IM/frontend breadth: Telegram streaming/buttons/files, Feishu/WeCom/DingTalk encrypted callbacks and files.~~ **Telegram Done** (Phases A-E, 51 tests, pure text output). Next: Feishu/WeCom/DingTalk encrypted callbacks and file parity.
 4. Add optional tracing integration and final real-LLM smoke matrix.
 5. Update Phase 5 browser bridge with broader manual website edge cases (provider-specific autofill, download shelf UI).
 
@@ -198,7 +198,7 @@ Remaining priority:
 **Changes made**:
 - Phase 2 (LLM Core): `Partial` → `Done/P1` — Profile-based LLM configuration (`config/llms.toml`) implemented with layered profile→model resolution
 - Phase 6 (TUI): Added ToggleMouseCapture (F7/Ctrl-M) and improved `ask_user` interaction to feature list
-- Telegram (IM): `Partial/P2` → Telegram portion **Done** — Phase A: send_tg_md2 + extract_feishu/wecom_json_text; Phase B: MarkdownV2 complete parser (6 sub-functions); Phase C: StreamSession + TurnStreamCoordinator + send_tg_md2 fallback; Phase D: command routing (/abort /continue /btw /debug) + ask_user inline buttons (7 functions); Phase E: file handling pipeline + proxy + UserState. **65 unit tests**, 0 failures. Feishu/WeCom/DingTalk remain Partial/P2.
+- Telegram (IM): `Partial/P2` → Telegram portion **Done** — Phase A: send_tg_md2 + extract_feishu/wecom_json_text; Phase B: StreamSession + TurnStreamCoordinator; Phase C: command routing (/abort /continue /btw /debug) + ask_user inline buttons (7 functions); Phase D: file handling pipeline + proxy + UserState. **51 unit tests**, 0 failures. Pure text output (no MarkdownV2/HTML conversion). Feishu/WeCom/DingTalk remain Partial/P2.
 
 **Next review due**: 2026-05-18 (or after significant feature merges)
 

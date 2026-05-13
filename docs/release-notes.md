@@ -1,5 +1,11 @@
 # Release Notes
 
+## v0.1.8
+
+- Telegram 前端消息改为纯文本输出，移除所有 MarkdownV2 和 HTML 转换逻辑（`escape_html()`, `markdown_to_html()`, `FILE_HINT`, `TG_PARSE_MODE`），解决 Agent 输出中特殊字符被错误转义的问题。
+- Telegram 前端不再输出工具调用信息（🔧/✅/❌），用户只看到最终回复文本。
+- 修复 `agent_paths` 测试在 CI 环境下因 HOME 环境变量污染导致的失败。
+
 ## v0.1.7
 
 - Improved full-screen TUI session naming: default sessions are auto-named from the first user prompt, historical sessions prefer their first user prompt over timestamp-only names, and the Sessions sidebar keeps more readable title width.

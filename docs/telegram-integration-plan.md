@@ -19,16 +19,18 @@
 | `handle_chat_text()` | 24行 | 命令路由 /help /status /stop /llm /new |
 | 辅助函数 | 66行 | split_text, extract_file_markers, looks_like_local_file |
 
-**缺失特性**: 流式编辑、inline buttons、callback query、ask_user 菜单、MarkdownV2 转义、图片/文件发送、BotCommand 菜单注册、reply_to 错误处理、多 chat_id 并发、typing 指示器。
+**缺失特性**: 流式编辑、inline buttons、callback query、ask_user 菜单、图片/文件发送、BotCommand 菜单注册、reply_to 错误处理、多 chat_id 并发、typing 指示器。
+
+**设计决策**: 不采用上游的 MarkdownV2 解析器，所有消息以纯文本发送。理由：Telegram 纯文本本身支持基本格式（换行、符号），MarkdownV2 转义规则复杂易出错，且对最终用户体验提升有限。
 
 ### 1.2 上游 tgapp.py 能力清单 (917行, 39个函数/类)
 
 | 类别 | 函数 | 行号 | 行为 |
 |------|------|------|------|
-| MD转义 | `_to_markdown_v2` | L208 | 完整MarkdownV2解析器：正则识别code block/quote/link/inline code结构，各段分别转义 |
-| MD转义 | `_escape_pre/_escape_code/_escape_link_target` | L195-203 | 按entity_type不同转义规则 |
-| MD转义 | `_quote_to_markdown_v2` | L204 | quote文本专用转义 |
-| MD转义 | `_is_not_modified_error` | L239 | 识别400 "message is not modified" 错误 |
+| MD转义 | `_to_markdown_v2` | L208 | 完整MarkdownV2解析器：正则识别code block/quote/link/inline code结构，各段分别转义（**未采用，见§1设计决策**） |
+| MD转义 | `_escape_pre/_escape_code/_escape_link_target` | L195-203 | 按entity_type不同转义规则（**未采用**） |
+| MD转义 | `_quote_to_markdown_v2` | L204 | quote文本专用转义（**未采用**） |
+| MD转义 | `_is_not_modified_error` | L239 | 识别400 "message is not modified" 错误（**未采用，纯文本无需此检查**） |
 | 流式 | `_make_draft_id` | L71 | 生成草稿ID |
 | 流式 | `_visible_segments/_markdown_safe_segments` | L74-111 | 按行/代码围栏切分可见段 |
 | 流式 | `_line_complete/_maybe_partial_code_fence` | L112-128 | 行完整性检测、代码围栏追踪 |
@@ -67,11 +69,11 @@
 | 基建 | ensure_single_instance | - | 防止多实例运行 |
 | 基建 | ctx.user_data['stream_task'] | L756 | 流式任务JoinHandle管理 |
 | 基建 | 429 rate limit retry | - | API限流自动重试 |
-| 基建 | FILE_HINT constant | - | 文件大小/类型提示常量 |
+| 基建 | FILE_HINT constant | - | 文件大小/类型提示常量（**已移除**） |
 
 ### 1.3 差异汇总: 16项遗漏
 
-**P0关键(6项)**: MarkdownV2解析器、StreamSession类、TurnStreamCoordinator、is_not_modified_error、drain_ask_event、normalize_ask_menu  
+**P0关键(6项)**: StreamSession类、TurnStreamCoordinator、is_not_modified_error、drain_ask_event、normalize_ask_menu、~~MarkdownV2解析器~~（已移除，采用纯文本输出）  
 **命令(5项)**: /abort、/continue、/btw、/debug、_normalized_command别名表  
 **基建(5项)**: Proxy、stream_task句柄、callback_data解析、ask结果渲染、文件路径解析链
 
@@ -116,7 +118,6 @@
 │  ┌───────────────────────────────────────────┐   │
 │  │  Shared Layer                             │   │
 │  │  split_text  extract_file_markers         │   │
-│  │  [新增] MarkdownV2 parser                 │   │
 │  │  [新增] _resolve_files/_files_from_text   │   │
 │  │  [新增] Proxy config                      │   │
 │  │  [新增] ensure_single_instance            │   │
@@ -130,11 +131,10 @@
 ### 2.1 分阶段交付
 
 **P0 — 流式编辑 (核心循环)** ✅
-- ✅ MarkdownV2转义解析器 (`_to_markdown_v2`)
 - ✅ `_TelegramStreamSession` 类 (segment buffer, draft_id, 编辑节流)
 - ✅ `_TelegramTurnStreamCoordinator` 类 (turn标记, 行缓冲, 代码围栏)
-- ✅ editMessageText 定时刷新 + `is_not_modified_error` 容错
-- ✅ parse_mode fallback (MarkdownV2失败→纯文本)
+- ✅ editMessageText 定时刷新
+- ✅ 纯文本输出（不使用MarkdownV2/HTML，所有消息原样发送）
 
 **P1 — Inline Buttons + ask_user** ✅
 - ✅ InlineKeyboardMarkup 动态按钮
@@ -174,39 +174,17 @@ enum AskUserEvent {
 }
 ```
 
-### 2.3 MarkdownV2 Parser 设计
+### 2.3 ~~MarkdownV2 Parser 设计~~ → 纯文本输出决策
 
-上游 `_to_markdown_v2` 是完整的结构化解析器，非简单字符转义：
+> **设计变更**: 初版设计包含完整MarkdownV2解析器，实施后发现转义规则对用户输出产生大量异常字符，改为纯文本输出。
 
-```
-解析流程:
-1. 用正则识别结构: code block (```)、inline code (`)、quote (>)、link ([text](url))
-2. 对各段分别应用不同转义规则:
-   - 纯文本段: 转义 _*[]()~`>#+-=|{}.! 字符
-   - code block: 仅转义 \` 和 \\
-   - inline code: 仅转义 \` 和 \\
-   - link target: 仅转义 ) 和 \\
-3. 保持MarkdownV2 entity结构完整
-```
+**决策理由**:
+1. Telegram 纯文本本身支持换行、链接自动识别
+2. MarkdownV2 转义规则复杂（`_*[]()~`>#+-=|{}.!`），需要逐字符判断上下文，易出错
+3. Agent 输出通常为结构化文本，MarkdownV2 格式化反而降低可读性
+4. 上游的 HTML 转换也会导致 `<` `&` 等字符丢失
 
-**Rust实现策略**:
-- 使用 `regex` crate 的命名捕获组识别结构
-- 分段处理，每段应用不同 `_escape_*` 函数
-- 返回 `String` (已转义的MarkdownV2文本)
-
-```rust
-fn to_markdown_v2(text: &str) -> String {
-    // 1. 分割: code fence / inline code / link / quote / plain text
-    // 2. 各段分别转义
-    // 3. 拼接返回
-}
-
-fn escape_pre(text: &str) -> String { /* code block: 转义 \` \\ */ }
-fn escape_code(text: &str) -> String { /* inline code: 转义 \` \\ */ }
-fn escape_link_target(text: &str) -> String { /* link: 转义 ) \\ */ }
-fn quote_to_markdown_v2(text: &str) -> String { /* quote: 专用规则 */ }
-fn is_not_modified_error(exc: &str) -> bool { /* 400 "message is not modified" */ }
-```
+**实现**: `send_message` / `editMessageText` 均不设置 `parse_mode`，消息原样发送。
 
 ### 2.4 StreamSession 类设计
 
@@ -398,7 +376,6 @@ lib.rs 当前结构 (2412行):
 ├── telegram (1682-1869)      ← 现有190行
 │   // === Telegram Data Types ===
 │   // === Telegram Helper Functions ===
-│   // === Telegram MarkdownV2 Parser === [新增]
 │   // === Telegram StreamSession === [新增]
 │   // === Telegram TurnStreamCoordinator === [新增]
 │   // === Telegram ask_user System === [新增]
@@ -416,7 +393,7 @@ lib.rs 当前结构 (2412行):
 | 步骤 | 内容 | 估时 | 完成判据 |
 |------|------|------|----------|
 | Phase A ✅ | 更新集成方案文档(本文档) | 0.5h | 文档包含所有16项遗漏的Rust设计 |
-| Phase B ✅ | MarkdownV2解析器 | 1h | `cargo build`通过 + 6个单元测试通过 |
+| Phase B ✅ | StreamSession + 纯文本输出 | 1h | `cargo build`通过 + 编辑行为测试 |
 | Phase C ✅ | StreamSession + Coordinator | 2h | `cargo build`通过 + 编辑行为测试 |
 | Phase D ✅ | 命令路由 + ask_user | 1.5h | `cargo build`通过 + ask_user流程测试 |
 | Phase E ✅ | 文件处理 + 基建 | 1h | `cargo build`通过 |
@@ -429,7 +406,7 @@ lib.rs 当前结构 (2412行):
 | 风险 | 缓解 |
 |------|------|
 | Telegram API rate limit (30 msg/s per chat) | 流式编辑节流≥1s，分段发送间隔500ms |
-| MarkdownV2转义遗漏导致发送失败 | 带parse_mode发送失败时fallback到纯文本重试 |
+| ~~MarkdownV2转义遗漏导致发送失败~~ | ~~带parse_mode发送失败时fallback到纯文本重试~~（已移除，纯文本输出无需转义） |
 | callback_query超时 (Telegram默认5s) | 立即answerCallbackQuery，实际处理异步进行 |
 | Rust regex命名捕获组 vs Python regex | 测试覆盖各entity类型 |
 | "not modified" 错误码一致性 | `_is_not_modified_error` 检查status code + body |
@@ -441,8 +418,9 @@ lib.rs 当前结构 (2412行):
 
 ## 6. 对齐 upstream-parity-alignment.md
 
-当前状态: ✅ `Done+/P2` (Phase A-F全部完成，65测试)
+当前状态: ✅ `Done+/P2` (Phase A-F全部完成，51测试)
 
 已更新位置:
 - ✅ L180: 标记 Telegram streaming edit + inline buttons + file support 完成
 - ✅ L188: 更新 Telegram 进度为 Done
+- ✅ 纯文本输出设计决策（移除MarkdownV2/HTML转换，工具输出过滤）
