@@ -3433,6 +3433,15 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
         fs::write(source.join("Cargo.toml"), "[workspace]").unwrap();
         write_resource_markers(&source);
+        // Temporarily remove env vars that would override path detection
+        let saved_ws = env::var_os("KODA_WORKSPACE");
+        let saved_home = env::var_os("KODA_AGENT_HOME");
+        // SAFETY: test-only env manipulation before calling into tested code
+        #[allow(unused_unsafe)]
+        unsafe {
+            env::remove_var("KODA_WORKSPACE");
+            env::remove_var("KODA_AGENT_HOME");
+        }
         let paths = resolve_agent_paths_with_options(
             &nested,
             AgentPathOptions {
@@ -3440,6 +3449,16 @@ mod tests {
                 ..Default::default()
             },
         );
+        // Restore env vars
+        #[allow(unused_unsafe)]
+        unsafe {
+            if let Some(ws) = saved_ws {
+                env::set_var("KODA_WORKSPACE", ws);
+            }
+            if let Some(h) = saved_home {
+                env::set_var("KODA_AGENT_HOME", h);
+            }
+        }
         assert_eq!(paths.workspace_dir, nested);
         assert_eq!(paths.resource_dir, source);
     }

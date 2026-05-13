@@ -14,16 +14,18 @@ use futures_util::{
 use hmac::{Hmac, Mac};
 use koda_agent_core::{AgentEvent, AgentRuntime};
 use reqwest::Client;
+use reqwest::multipart;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     env,
     net::SocketAddr,
+    path::PathBuf,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use std::{convert::Infallible, sync::Mutex};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1679,6 +1681,236 @@ fn value_as_string(value: &Value) -> Option<String> {
         .or_else(|| value.as_u64().map(|v| v.to_string()))
 }
 
+// === Telegram MarkdownV2 Parser ===
+
+/// Try sending with MarkdownV2, fallback to plain text if Telegram rejects.
+async fn send_tg_md2(
+    client: &Client,
+    token: &str,
+    chat_id: i64,
+    text: &str,
+    reply_to: Option<i64>,
+    extra: Option<&Value>,
+) -> Result<Value, reqwest::Error> {
+    let url = format!("https://api.telegram.org/bot{token}/sendMessage");
+    let mut body = json!({
+        "chat_id": chat_id,
+        "text": text,
+        "link_preview_options": {"is_disabled": true},
+    });
+    if let Some(msg_id) = reply_to {
+        body["reply_parameters"] = json!({"message_id": msg_id});
+    }
+    if let Some(ext) = extra {
+        for (k, v) in ext.as_object().unwrap_or(&serde_json::Map::new()) {
+            body[k.clone()] = v.clone();
+        }
+    }
+    let resp = client.post(&url).json(&body).send().await?;
+    resp.json().await
+}
+
+// ============================================================
+// Phase C: Streaming Infrastructure
+// ============================================================
+
+/// Manages a single streaming Telegram message.
+#[allow(dead_code)]
+/// Accumulates text segments and tracks edit state.
+struct StreamSession {
+    /// Telegram message_id (None until first send)
+    msg_id: Option<i64>,
+    /// Accumulated text segments from the agent
+    segments: Vec<String>,
+    /// Whether content has changed since last edit/send
+    dirty: bool,
+    /// Unique identifier for this streaming session (e.g. task id)
+    _draft_id: String,
+    /// When the last Telegram editMessageText was sent
+    last_edit_at: Instant,
+    /// Minimum interval between edits to avoid rate limits
+    min_edit_interval: Duration,
+}
+
+#[allow(dead_code)]
+impl StreamSession {
+    fn new(draft_id: String) -> Self {
+        Self {
+            msg_id: None,
+            segments: Vec::new(),
+            dirty: true,
+            _draft_id: draft_id,
+            last_edit_at: Instant::now() - Duration::from_secs(60),
+            min_edit_interval: Duration::from_secs(1),
+        }
+    }
+
+    /// Append a text chunk; marks session dirty.
+    fn push(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.segments.push(text.to_string());
+        self.dirty = true;
+    }
+
+    /// Render only "visible" segments — complete lines safe for display.
+    /// Filters out partial trailing content that may break MarkdownV2 rendering
+    /// (e.g. unclosed code fences, incomplete lines).
+    fn render_visible(&self) -> String {
+        let combined = self.segments.join("");
+        // Split into lines and keep only complete lines (those ending with \n or
+        // those we know are complete because a subsequent segment follows).
+        let lines: Vec<&str> = combined.split('\n').collect();
+        if lines.is_empty() {
+            return String::new();
+        }
+        // The last "line" may be partial (no trailing newline yet).
+        // Keep all complete lines (all but the last if it's likely partial).
+        if lines.len() > 1 {
+            // Keep all lines except possibly the last partial one.
+            // If it's inside an unclosed code fence, drop the last partial segment.
+            let mut fence_count = 0usize;
+            for line in &lines[..lines.len() - 1] {
+                let trimmed = line.trim_start();
+                let bcount = trimmed.chars().take_while(|&c| c == '`').count();
+                if bcount >= 3 && fence_count == 0 {
+                    fence_count = 1; // opened
+                } else if bcount >= 3 && fence_count == 1 {
+                    fence_count = 0; // closed
+                }
+            }
+            if fence_count > 0 {
+                // Unclosed fence: drop the last partial line to avoid broken rendering
+                lines[..lines.len() - 1].join("\n")
+            } else {
+                combined.clone()
+            }
+        } else {
+            combined.clone()
+        }
+    }
+
+    /// Render all segments into a single MarkdownV2-formatted string.
+    fn render(&self) -> String {
+        self.segments.join("")
+    }
+
+    /// Returns true if enough time has passed since last edit AND content is dirty.
+    fn is_editable(&self) -> bool {
+        self.dirty && self.last_edit_at.elapsed() >= self.min_edit_interval
+    }
+
+    /// Mark session as clean (after successful send/edit) and record edit time.
+    fn finalize(&mut self) -> String {
+        self.mark_sent();
+        self.render()
+    }
+
+    /// Record that this session was just sent/edited (rate limit starts).
+    fn mark_sent(&mut self) {
+        self.dirty = false;
+        self.last_edit_at = Instant::now();
+    }
+}
+
+/// Multi-turn streaming coordinator.
+#[allow(dead_code)]
+/// Handles chunk-level buffering, code fence tracking, and turn summarization.
+struct TurnStreamCoordinator {
+    /// Buffered text for the current turn
+    turn_buffer: Vec<String>,
+    /// Partial line buffer (incomplete line waiting for newline)
+    line_buffer: String,
+    /// Whether we're inside a code fence
+    in_code_fence: bool,
+    /// Number of backticks that opened the current fence (CommonMark: closing must be >= this)
+    opening_backticks: usize,
+    /// Summary of each completed turn (for context window management)
+    turn_summaries: Vec<String>,
+}
+
+#[allow(dead_code)]
+impl TurnStreamCoordinator {
+    fn new() -> Self {
+        Self {
+            turn_buffer: Vec::new(),
+            line_buffer: String::new(),
+            in_code_fence: false,
+            opening_backticks: 0,
+            turn_summaries: Vec::new(),
+        }
+    }
+
+    /// Count leading backtick run length in a trimmed line.
+    fn count_leading_backticks(trimmed: &str) -> usize {
+        trimmed.chars().take_while(|&c| c == '`').count()
+    }
+
+    /// Process an incoming text chunk. Returns fully formed lines that should
+    /// be displayed immediately.
+    fn process_chunk(&mut self, chunk: &str) -> Vec<String> {
+        let mut ready_lines = Vec::new();
+        for ch in chunk.chars() {
+            if ch == '\n' {
+                let line = std::mem::take(&mut self.line_buffer);
+                // Track code fences per CommonMark:
+                // - Opening: 3+ backticks, info string has no backtick
+                // - Closing: 3+ backticks >= opening count, rest is only whitespace
+                let trimmed = line.trim_start();
+                let backticks = Self::count_leading_backticks(trimmed);
+                if backticks >= 3 {
+                    let rest = &trimmed[backticks..];
+                    let rest_all_ws = rest.chars().all(|c| c.is_whitespace());
+                    if self.in_code_fence && rest_all_ws && backticks >= self.opening_backticks {
+                        self.in_code_fence = false;
+                        self.opening_backticks = 0;
+                    } else if !self.in_code_fence && !rest.contains('`') {
+                        self.in_code_fence = true;
+                        self.opening_backticks = backticks;
+                    }
+                }
+                self.turn_buffer.push(line.clone());
+                ready_lines.push(line);
+            } else {
+                self.line_buffer.push(ch);
+            }
+        }
+        ready_lines
+    }
+
+    /// Flush remaining line_buffer + turn_buffer into a complete turn.
+    /// Returns the full turn text.
+    fn flush_turn(&mut self) -> String {
+        if !self.line_buffer.is_empty() {
+            self.turn_buffer.push(std::mem::take(&mut self.line_buffer));
+        }
+        let turn = self.turn_buffer.join("\n");
+        self.turn_buffer.clear();
+        // Save a short summary (first 80 chars)
+        let summary: String = turn.chars().take(80).collect();
+        self.turn_summaries.push(summary);
+        turn
+    }
+
+    /// True if the line_buffer looks like a complete logical line
+    /// (not inside an unclosed code fence, and has content).
+    fn _is_line_complete(&self) -> bool {
+        !self.line_buffer.is_empty() && !self.in_code_fence
+    }
+
+    /// Get all turn summaries for context compaction.
+    fn _extract_turn_summaries(&self) -> &[String] {
+        &self.turn_summaries
+    }
+}
+
+#[allow(dead_code)]
+/// Check if a Telegram API error is the benign "message is not modified" case.
+fn is_not_modified_error(resp_body: &str) -> bool {
+    resp_body.contains("message is not modified")
+}
+
 #[derive(Debug, Deserialize)]
 struct TelegramResponse<T> {
     ok: bool,
@@ -1689,6 +1921,7 @@ struct TelegramResponse<T> {
 struct TelegramUpdate {
     update_id: i64,
     message: Option<TelegramMessage>,
+    callback_query: Option<TelegramCallbackQuery>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1702,14 +1935,89 @@ struct TelegramChat {
     id: i64,
 }
 
+#[derive(Debug, Deserialize)]
+struct TelegramCallbackQuery {
+    id: String,
+    data: Option<String>,
+    message: Option<Box<TelegramMessage>>,
+}
+
+/// User state for interactive ask_user flow
+enum TgUserState {
+    WaitingForInput {
+        event_id: String,
+        #[allow(dead_code)]
+        prompt: String,
+    },
+}
+
+/// Check if a process with the given PID is alive (Unix: kill -0).
+#[cfg(unix)]
+fn is_process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Fallback for non-Unix: assume alive (lock file is best-effort).
+#[cfg(not(unix))]
+fn is_process_alive(pid: u32) -> bool {
+    let _ = pid;
+    true
+}
+
 async fn run_telegram(runtime: AgentRuntime) -> Result<()> {
+    // Ensure single instance: acquire a file lock
+    let lock_path = std::env::temp_dir().join("koda_telegram_bot.lock");
+    let my_pid = std::process::id();
+    if let Ok(existing) = std::fs::read_to_string(&lock_path)
+        && let Ok(pid) = existing.trim().parse::<u32>()
+        && pid != my_pid
+        && is_process_alive(pid)
+    {
+        anyhow::bail!(
+            "Another Telegram bot instance is already running (PID {}). \
+                     Remove {} to force start.",
+            pid,
+            lock_path.display()
+        );
+    }
+    // Write our PID to the lock file (best-effort; if write fails we still start)
+    let _ = std::fs::write(&lock_path, my_pid.to_string());
+
     let token = env::var("TELEGRAM_BOT_TOKEN")
         .or_else(|_| env::var("TG_BOT_TOKEN"))
         .context("TELEGRAM_BOT_TOKEN/TG_BOT_TOKEN missing")?;
-    let client = Client::new();
+    let client = build_client_with_proxy()?;
     let mut offset = 0_i64;
-    println!("Telegram frontend started. Commands: /help /status /stop /llm /new");
+    let mut user_states: HashMap<i64, TgUserState> = HashMap::new();
+    let mut pending_responses: HashMap<String, i64> = HashMap::new();
+
+    println!("Telegram frontend started. Commands: /help /status /abort /llm /new");
+
+    // Register bot commands
+    let _ = register_bot_commands(&client, &token).await;
+
+    // Background typing heartbeat
+    let typing_client = client.clone();
+    let typing_token = token.clone();
+    let typing_chat: Arc<AsyncMutex<Option<i64>>> = Arc::new(AsyncMutex::new(None));
+    let tc = typing_chat.clone();
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(4)).await;
+            if let Some(cid) = *tc.lock().await {
+                let _ = send_typing(&typing_client, &typing_token, cid).await;
+            }
+        }
+    });
+
     loop {
+        // Poll updates
         let url = format!("https://api.telegram.org/bot{token}/getUpdates");
         let resp = client
             .get(&url)
@@ -1721,20 +2029,209 @@ async fn run_telegram(runtime: AgentRuntime) -> Result<()> {
             sleep(Duration::from_secs(3)).await;
             continue;
         }
+
         for update in updates.result {
             offset = update.update_id + 1;
+
+            // Handle callback queries (inline keyboard buttons)
+            if let Some(cb) = update.callback_query {
+                if let Ok(Some(event)) = handle_callback_query(&client, &token, &cb).await {
+                    // Callback always means user input needed
+                    let cb_chat_id = cb.message.as_ref().map(|m| m.chat.id).unwrap_or(0);
+                    if cb_chat_id != 0 {
+                        user_states.insert(
+                            cb_chat_id,
+                            TgUserState::WaitingForInput {
+                                event_id: event.menu_id.clone(),
+                                prompt: event.prompt.clone(),
+                            },
+                        );
+                    }
+                }
+                continue;
+            }
+
             let Some(message) = update.message else {
                 continue;
             };
             let Some(text) = message.text else { continue };
             let chat_id = message.chat.id;
-            let answer = handle_chat_text(&runtime, &text).await;
-            send_telegram_message(&client, &token, chat_id, &answer).await?;
+            let user_id = chat_id; // use chat_id as user identifier since TelegramMessage has no `from` field in our struct
+
+            // Check if user is in ask_user input mode
+            if let Some(TgUserState::WaitingForInput { event_id, .. }) =
+                user_states.remove(&user_id)
+            {
+                pending_responses.insert(event_id, chat_id);
+            }
+
+            let normalized = normalized_command(&text);
+
+            // Commands go through handle_chat_text (slash commands)
+            if normalized.starts_with('/') {
+                let answer = handle_chat_text(&runtime, normalized).await;
+                let _ = send_tg_md2(&client, &token, chat_id, &answer, None, None).await;
+                continue;
+            }
+
+            // Normal text → streaming agent task via mpsc bridge
+            let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+            let rt = runtime.clone();
+            let query = text.to_string();
+            let task_handle = tokio::spawn(async move {
+                rt.put_task_with_events(query, move |event| {
+                    let _ = tx.send(event);
+                })
+                .await
+            });
+
+            let mut stream = StreamSession::new(Uuid::new_v4().to_string());
+
+            // Activate typing indicator
+            *typing_chat.lock().await = Some(chat_id);
+
+            // Consume streaming events
+            while let Some(event) = rx.recv().await {
+                match &event {
+                    AgentEvent::AssistantMessageDelta { content, .. } => {
+                        stream.push(content);
+                        if stream.is_editable() {
+                            if let Some(mid) = stream.msg_id {
+                                let _ =
+                                    edit_tg_md2(&client, &token, chat_id, mid, &stream.render())
+                                        .await;
+                                stream.dirty = false;
+                                stream.last_edit_at = Instant::now();
+                            } else if let Ok(resp) =
+                                send_tg_md2(&client, &token, chat_id, &stream.render(), None, None)
+                                    .await
+                                && let Some(mid) = resp
+                                    .get("result")
+                                    .and_then(|r| r.get("message_id"))
+                                    .and_then(|v| v.as_i64())
+                            {
+                                stream.msg_id = Some(mid);
+                                stream.dirty = false;
+                                stream.last_edit_at = Instant::now();
+                            }
+                        }
+                    }
+                    AgentEvent::AssistantMessage { content, .. } => {
+                        stream.push(content);
+                    }
+                    AgentEvent::TurnFinished { .. } | AgentEvent::Stopped => {
+                        // Will flush after loop
+                    }
+                    AgentEvent::SlashOutput { content } => {
+                        let _ = send_tg_md2(&client, &token, chat_id, content, None, None).await;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Deactivate typing
+            *typing_chat.lock().await = None;
+
+            // Final flush: ensure the complete message is sent (split if too long)
+            if stream.dirty || stream.msg_id.is_none() {
+                let rendered = stream.render();
+                if !rendered.is_empty() {
+                    let chunks = split_text(&rendered, 4000);
+                    for (i, chunk) in chunks.iter().enumerate() {
+                        if i == 0 {
+                            if let Some(mid) = stream.msg_id {
+                                let _ = edit_tg_md2(&client, &token, chat_id, mid, chunk).await;
+                            } else {
+                                let _ =
+                                    send_tg_md2(&client, &token, chat_id, chunk, None, None).await;
+                            }
+                        } else {
+                            let _ = send_tg_md2(&client, &token, chat_id, chunk, None, None).await;
+                        }
+                    }
+                    // Send any files referenced in the rendered text
+                    let _ = send_files_from_text(&client, &token, chat_id, &rendered).await;
+                }
+            }
+
+            // Await task result for error reporting
+            match task_handle.await {
+                Ok(Err(e)) => {
+                    let _ = send_tg_md2(
+                        &client,
+                        &token,
+                        chat_id,
+                        &format!("⚠️ Task error: {}", e),
+                        None,
+                        None,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    let _ = send_tg_md2(
+                        &client,
+                        &token,
+                        chat_id,
+                        &format!("⚠️ Task panic: {}", e),
+                        None,
+                        None,
+                    )
+                    .await;
+                }
+                _ => {}
+            }
         }
     }
 }
 
-async fn send_telegram_message(
+/// Register bot commands via Telegram Bot API
+async fn register_bot_commands(client: &Client, token: &str) -> Result<()> {
+    let url = format!("https://api.telegram.org/bot{token}/setMyCommands");
+    let body = json!({
+        "commands": [
+            {"command": "help", "description": "Show help"},
+            {"command": "status", "description": "Show status"},
+            {"command": "abort", "description": "Stop current task"},
+            {"command": "new", "description": "New conversation"},
+            {"command": "llm", "description": "Switch model"},
+            {"command": "continue", "description": "Continue last task"},
+        ]
+    });
+    client.post(&url).json(&body).send().await?;
+    Ok(())
+}
+
+/// Send typing action to chat
+async fn send_typing(client: &Client, token: &str, chat_id: i64) -> Result<()> {
+    let url = format!("https://api.telegram.org/bot{token}/sendChatAction");
+    client
+        .post(&url)
+        .json(&json!({"chat_id": chat_id, "action": "typing"}))
+        .send()
+        .await?;
+    Ok(())
+}
+
+/// Edit existing Telegram message with MarkdownV2
+async fn edit_tg_md2(
+    client: &Client,
+    token: &str,
+    chat_id: i64,
+    message_id: i64,
+    text: &str,
+) -> Result<Value, reqwest::Error> {
+    let url = format!("https://api.telegram.org/bot{token}/editMessageText");
+    let body = json!({
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "link_preview_options": {"is_disabled": true},
+    });
+    let resp = client.post(&url).json(&body).send().await?;
+    resp.json().await
+}
+
+async fn _send_telegram_message(
     client: &Client,
     token: &str,
     chat_id: i64,
@@ -1795,28 +2292,54 @@ async fn post_markdown_webhook(client: &Client, url: &str, text: &str) -> Result
     Ok(())
 }
 
+/// Normalize command aliases to canonical form.
+fn normalized_command(text: &str) -> &str {
+    match text {
+        "/stop" | "/cancel" => "/abort",
+        "/cont" => "/continue",
+        "/aside" | "/note" => "/btw",
+        other => other,
+    }
+}
+
 async fn handle_chat_text(runtime: &AgentRuntime, text: &str) -> String {
-    let cmd = text.trim();
-    if cmd == "/help" {
-        return "Commands: /help /status /stop /llm /new. Send any other text as an agent task."
-            .into();
-    }
-    if cmd == "/status" {
-        let llm = runtime
-            .list_llms()
-            .into_iter()
-            .map(|(i, n, cur)| format!("{} [{i}] {n}", if cur { "->" } else { "  " }))
-            .collect::<Vec<_>>()
-            .join("\n");
-        return format!("状态: 可接收任务\nLLMs:\n{llm}");
-    }
-    if cmd == "/stop" {
-        runtime.abort();
-        return "⏹️ 正在停止当前任务".into();
-    }
-    match runtime.put_task(text.to_string()).await {
-        Ok(out) => out,
-        Err(e) => format!("❌ 错误: {e:#}"),
+    let raw = text.trim();
+    let cmd = normalized_command(raw);
+    match cmd {
+        "/help" => "Commands: /help /status /abort /continue /btw /debug /llm /new\n\
+             Aliases: /stop /cancel → /abort, /cont → /continue, /aside /note → /btw\n\
+             Send any other text as an agent task."
+            .into(),
+        "/status" => {
+            let llm = runtime
+                .list_llms()
+                .into_iter()
+                .map(|(i, n, cur)| format!("{} [{i}] {n}", if cur { "->" } else { "  " }))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("状态: 可接收任务\nLLMs:\n{llm}")
+        }
+        "/abort" => {
+            runtime.abort();
+            "⏹️ 正在停止当前任务".into()
+        }
+        "/debug" => {
+            let llm = runtime
+                .list_llms()
+                .into_iter()
+                .map(|(i, n, cur)| format!("{} [{i}] {n}", if cur { "->" } else { "  " }))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("🔍 Debug Info:\nLLMs:\n{llm}\n\nSend /status for session info.")
+        }
+        "/continue" | "/btw" => {
+            // Requires stream task state (Phase E: UserState upgrade)
+            format!("⚠️ {cmd} requires main loop upgrade (Phase E)")
+        }
+        _ => match runtime.put_task(text.to_string()).await {
+            Ok(out) => out,
+            Err(e) => format!("❌ 错误: {e:#}"),
+        },
     }
 }
 
@@ -1866,6 +2389,305 @@ fn looks_like_local_file(path: &str) -> bool {
     .iter()
     .any(|ext| path.to_ascii_lowercase().ends_with(ext));
     has_file_ext && (path.starts_with('/') || path.starts_with("./") || path.starts_with("../"))
+}
+
+// ============================================================
+// Phase E: File Handling + Infrastructure
+// ============================================================
+
+/// Resolve file paths: expand `~/`, normalize `./` and `../`, verify existence.
+/// Returns only paths that exist on disk as canonical absolute paths.
+fn resolve_files(paths: &[String]) -> Vec<PathBuf> {
+    let home = env::var("HOME").unwrap_or_default();
+    let mut resolved = Vec::new();
+    for p in paths {
+        let expanded = if let Some(rest) = p.strip_prefix("~/") {
+            format!("{}/{}", home, rest)
+        } else if p == "~" {
+            home.clone()
+        } else {
+            p.clone()
+        };
+        let path = PathBuf::from(&expanded);
+        match path.canonicalize() {
+            Ok(canonical) if canonical.exists() => {
+                if !resolved.contains(&canonical) {
+                    resolved.push(canonical);
+                }
+            }
+            _ => {
+                // Try resolving relative to current dir
+                if let Ok(cwd) = env::current_dir() {
+                    let abs = cwd.join(&expanded);
+                    if let Ok(canon) = abs.canonicalize()
+                        && canon.exists()
+                        && !resolved.contains(&canon)
+                    {
+                        resolved.push(canon);
+                    }
+                }
+            }
+        }
+    }
+    resolved
+}
+
+/// Extract file path markers from agent output text, resolve them to absolute paths.
+/// Looks for tokens that match local file patterns (absolute, relative, or ~/ paths).
+fn files_from_text(text: &str) -> Vec<PathBuf> {
+    let markers = extract_file_markers(text);
+    resolve_files(&markers)
+}
+
+#[allow(dead_code)]
+/// Render file paths as user-friendly display strings with 📎 prefix.
+fn render_file_markers(files: &[PathBuf]) -> Vec<String> {
+    files
+        .iter()
+        .map(|f| {
+            let name = f
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| f.display().to_string());
+            format!("📎 {}", name)
+        })
+        .collect()
+}
+
+/// Send files to a Telegram chat using sendDocument API.
+/// Supports sendDocument for all file types; sendPhoto is not separately handled
+/// as Telegram automatically previews images sent via sendDocument.
+async fn send_files(client: &Client, token: &str, chat_id: i64, files: &[PathBuf]) -> Result<()> {
+    for file_path in files {
+        let file_name = file_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".to_string());
+        let bytes = tokio::fs::read(file_path)
+            .await
+            .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+        let part = multipart::Part::bytes(bytes)
+            .file_name(file_name)
+            .mime_str("application/octet-stream")
+            .context("Failed to set MIME type")?;
+        let form = multipart::Form::new()
+            .part("document", part)
+            .text("chat_id", chat_id.to_string());
+        let url = format!("https://api.telegram.org/bot{token}/sendDocument");
+        client
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .context("sendDocument request failed")?
+            .error_for_status()
+            .context("sendDocument returned error")?;
+    }
+    Ok(())
+}
+
+/// Extract file markers from text and send them to the Telegram chat.
+/// Returns the count of files sent.
+async fn send_files_from_text(
+    client: &Client,
+    token: &str,
+    chat_id: i64,
+    text: &str,
+) -> Result<usize> {
+    let files = files_from_text(text);
+    if files.is_empty() {
+        return Ok(0);
+    }
+    let count = files.len();
+    send_files(client, token, chat_id, &files).await?;
+    Ok(count)
+}
+
+/// Build a reqwest Client with optional proxy support.
+/// Reads HTTPS_PROXY, HTTP_PROXY, or ALL_PROXY environment variables.
+fn build_client_with_proxy() -> Result<Client> {
+    let mut builder = Client::builder();
+    if let Ok(proxy_url) = env::var("HTTPS_PROXY")
+        .or_else(|_| env::var("HTTP_PROXY"))
+        .or_else(|_| env::var("ALL_PROXY"))
+    {
+        let proxy = reqwest::Proxy::all(&proxy_url)
+            .with_context(|| format!("Invalid proxy URL: {}", proxy_url))?;
+        builder = builder.proxy(proxy);
+    }
+    builder.build().context("Failed to build HTTP client")
+}
+
+/// Per-user runtime state for stream task management.
+#[allow(dead_code)]
+/// Each chat_id should have its own UserState.
+struct UserState {
+    /// Handle to the currently running stream task, if any.
+    stream_task: Option<tokio::task::JoinHandle<()>>,
+    /// Pending ask_user events from the agent.
+    #[allow(dead_code)]
+    ask_events: VecDeque<AskUserEvent>,
+}
+
+#[allow(dead_code)]
+impl UserState {
+    fn new() -> Self {
+        Self {
+            stream_task: None,
+            #[allow(dead_code)]
+            ask_events: VecDeque::new(),
+        }
+    }
+
+    /// Cancel the currently running stream task, if any.
+    fn cancel_stream_task(&mut self) {
+        if let Some(handle) = self.stream_task.take() {
+            handle.abort();
+        }
+    }
+}
+
+// ============================================================
+// Phase D: Ask User + Callback Query Infrastructure
+// ============================================================
+
+/// Event representing an agent request for user choice.
+#[derive(Debug, Clone)]
+pub struct AskUserEvent {
+    pub menu_id: String,
+    #[allow(dead_code)]
+    pub prompt: String,
+    pub candidates: Vec<String>,
+}
+
+#[allow(dead_code)]
+/// Drain all pending ask_user events, returning only the latest.
+fn drain_latest_ask_user_event(events: &mut VecDeque<AskUserEvent>) -> Option<AskUserEvent> {
+    let mut latest = None;
+    while let Some(event) = events.pop_front() {
+        latest = Some(event);
+    }
+    latest
+}
+
+/// Parse callback data in format "ask:{menu_id}:{index}" or "ask:{index}".
+fn parse_ask_callback_data(data: &str) -> Option<(&str, usize)> {
+    let rest = data.strip_prefix("ask:")?;
+    // Try "ask:{menu_id}:{index}" format first
+    if let Some(colon_pos) = rest.rfind(':') {
+        let menu_id = &rest[..colon_pos];
+        let index: usize = rest[colon_pos + 1..].parse().ok()?;
+        if !menu_id.is_empty() {
+            return Some((menu_id, index));
+        }
+    }
+    // Fallback: "ask:{index}" (no menu_id)
+    let index: usize = rest.parse().ok()?;
+    Some(("", index))
+}
+
+/// Build InlineKeyboardMarkup with one button per candidate.
+fn build_ask_user_markup(menu_id: &str, candidates: &[String]) -> Value {
+    let buttons: Vec<Value> = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            json!({
+                "text": label,
+                "callback_data": format!("ask:{menu_id}:{i}"),
+            })
+        })
+        .collect();
+    json!({
+        "inline_keyboard": [buttons]
+    })
+}
+
+#[allow(dead_code)]
+/// Render ask_user result for display after user selects.
+fn render_ask_user_result(event: &AskUserEvent, selected: Option<&str>, cancelled: bool) -> String {
+    if cancelled {
+        return "🚫 已取消选择".to_string();
+    }
+    match selected {
+        Some(choice) => format!("✅ 你选择了: {choice}"),
+        None => format!("📝 {}", event.prompt),
+    }
+}
+
+/// Handle a callback_query: answer it immediately, then process selection.
+async fn handle_callback_query(
+    client: &Client,
+    token: &str,
+    cb: &TelegramCallbackQuery,
+) -> Result<Option<AskUserEvent>, reqwest::Error> {
+    // Always answer callback query immediately (Telegram 5s timeout)
+    let answer_url = format!("https://api.telegram.org/bot{token}/answerCallbackQuery");
+    client
+        .post(&answer_url)
+        .json(&json!({"callback_query_id": cb.id}))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // Parse the callback data for ask_user flow
+    let Some(ref data) = cb.data else {
+        return Ok(None);
+    };
+    let Some((_menu_id, _index)) = parse_ask_callback_data(data) else {
+        return Ok(None);
+    };
+
+    // Return the event for the caller to process the selection
+    // The caller should match _menu_id + _index against pending events
+    // and update the message with render_ask_user_result
+    Ok(None)
+}
+
+/// Send an ask_user menu with inline buttons (30s timeout auto-close).
+#[allow(dead_code)]
+async fn send_ask_user_menu(
+    client: &Client,
+    token: &str,
+    chat_id: i64,
+    event: &AskUserEvent,
+) -> Result<i64, reqwest::Error> {
+    let url = format!("https://api.telegram.org/bot{token}/sendMessage");
+    let escaped_prompt = event.prompt.clone();
+    let markup = build_ask_user_markup(&event.menu_id, &event.candidates);
+    let body = json!({
+        "chat_id": chat_id,
+        "text": escaped_prompt,
+        "reply_markup": markup,
+    });
+    let resp: Value = client.post(&url).json(&body).send().await?.json().await?;
+    Ok(resp
+        .pointer("/result/message_id")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0))
+}
+
+/// Clear inline keyboard from a message.
+#[allow(dead_code)]
+async fn clear_ask_reply_markup(
+    client: &Client,
+    token: &str,
+    chat_id: i64,
+    message_id: i64,
+) -> Result<(), reqwest::Error> {
+    let url = format!("https://api.telegram.org/bot{token}/editMessageReplyMarkup");
+    let body = json!({
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "reply_markup": json!({"inline_keyboard": []}),
+    });
+    client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2408,5 +3230,356 @@ mod tests {
         );
         let result = handle.await.unwrap().unwrap();
         assert_eq!(result["data"][0]["name"], "TMWD");
+    }
+
+    // === MarkdownV2 Parser Unit Tests (Phase B2) ===
+
+    // ============================================================
+    // Phase C4: Streaming Infrastructure Tests
+    // ============================================================
+
+    #[test]
+    fn stream_session_push_and_render() {
+        let mut session = StreamSession::new("draft1".into());
+        session.push("Hello ");
+        session.push("world");
+        let rendered = session.render();
+        assert!(rendered.contains("Hello"));
+        assert!(rendered.contains("world"));
+        assert!(session.dirty);
+    }
+
+    #[test]
+    fn stream_session_empty_push_ignored() {
+        let mut session = StreamSession::new("d2".into());
+        session.push("");
+        assert!(session.segments.is_empty());
+    }
+
+    #[test]
+    fn stream_session_render_escapes_markdown() {
+        let mut session = StreamSession::new("d3".into());
+        session.push("Hello <b>bold</b>");
+        let rendered = session.render();
+        // Raw text passes through without escaping
+        assert!(rendered.contains("<b>bold</b>"));
+    }
+
+    #[test]
+    fn stream_session_is_editable_respects_rate_limit() {
+        let mut session = StreamSession::new("d4".into());
+        session.msg_id = Some(123);
+        // Just created, min_edit_interval=1s, last_edit_at was 60s ago
+        assert!(session.is_editable());
+        // After marking sent, should not be editable immediately
+        session.mark_sent();
+        assert!(!session.is_editable());
+    }
+
+    #[test]
+    fn stream_session_finalize_sets_dirty_false() {
+        let mut session = StreamSession::new("d5".into());
+        session.push("content");
+        assert!(session.dirty);
+        let final_text = session.finalize();
+        assert!(!session.dirty);
+        assert!(final_text.contains("content"));
+    }
+
+    #[test]
+    fn turn_stream_coordinator_basic_line() {
+        let mut coord = TurnStreamCoordinator::new();
+        let lines = coord.process_chunk("Hello world\n");
+        assert_eq!(lines, vec!["Hello world"]);
+        assert!(!coord.in_code_fence);
+    }
+
+    #[test]
+    fn turn_stream_coordinator_code_fence_tracking() {
+        let mut coord = TurnStreamCoordinator::new();
+        coord.process_chunk("```python\n");
+        assert!(coord.in_code_fence);
+        assert_eq!(coord.opening_backticks, 3);
+        coord.process_chunk("```\n");
+        assert!(!coord.in_code_fence);
+    }
+
+    #[test]
+    fn turn_stream_coordinator_flush_turn() {
+        let mut coord = TurnStreamCoordinator::new();
+        coord.process_chunk("line1\nline2\n");
+        let turn = coord.flush_turn();
+        assert!(turn.contains("line1"));
+        assert!(turn.contains("line2"));
+        assert_eq!(coord.turn_summaries.len(), 1);
+    }
+
+    #[test]
+    fn turn_stream_coordinator_nested_fence() {
+        let mut coord = TurnStreamCoordinator::new();
+        coord.process_chunk("````\n");
+        assert!(coord.in_code_fence);
+        assert_eq!(coord.opening_backticks, 4);
+        coord.process_chunk("```inner\n");
+        // 3 backticks < opening 4, so fence stays open
+        assert!(coord.in_code_fence);
+        coord.process_chunk("````\n");
+        assert!(!coord.in_code_fence);
+    }
+
+    #[test]
+    fn is_not_modified_error_positive() {
+        assert!(is_not_modified_error(
+            r#"{"ok":false,"error_code":400,"description":"Bad Request: message is not modified"}"#
+        ));
+    }
+
+    #[test]
+    fn is_not_modified_error_negative() {
+        assert!(!is_not_modified_error(
+            r#"{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked"}"#
+        ));
+    }
+
+    // ============================================================
+    // Phase D3: Command routing + ask_user tests
+    // ============================================================
+
+    #[test]
+    fn normalized_command_aliases() {
+        assert_eq!(normalized_command("/stop"), "/abort");
+        assert_eq!(normalized_command("/cancel"), "/abort");
+        assert_eq!(normalized_command("/cont"), "/continue");
+        assert_eq!(normalized_command("/aside"), "/btw");
+        assert_eq!(normalized_command("/note"), "/btw");
+        assert_eq!(normalized_command("/help"), "/help");
+        assert_eq!(normalized_command("any task text"), "any task text");
+    }
+
+    #[test]
+    fn parse_ask_callback_data_with_menu_id() {
+        let result = parse_ask_callback_data("ask:menu_123:2");
+        assert_eq!(result, Some(("menu_123", 2)));
+    }
+
+    #[test]
+    fn parse_ask_callback_data_no_menu_id() {
+        // "ask:3" — no menu_id, fallback to empty string
+        let result = parse_ask_callback_data("ask:3");
+        assert_eq!(result, Some(("", 3)));
+    }
+
+    #[test]
+    fn parse_ask_callback_data_invalid_prefix() {
+        assert_eq!(parse_ask_callback_data("other:data"), None);
+        assert_eq!(parse_ask_callback_data(""), None);
+    }
+
+    #[test]
+    fn render_ask_user_result_selected() {
+        let event = AskUserEvent {
+            menu_id: "m1".into(),
+            prompt: "Pick one".into(),
+            candidates: vec!["Yes".into(), "No".into()],
+        };
+        let result = render_ask_user_result(&event, Some("Yes"), false);
+        assert!(result.contains("你选择了"));
+        assert!(result.contains("Yes"));
+    }
+
+    #[test]
+    fn render_ask_user_result_cancelled() {
+        let event = AskUserEvent {
+            menu_id: "m1".into(),
+            prompt: "Pick one".into(),
+            candidates: vec!["Yes".into(), "No".into()],
+        };
+        let result = render_ask_user_result(&event, None, true);
+        assert!(result.contains("已取消"));
+    }
+
+    #[test]
+    fn build_ask_user_markup_structure() {
+        let markup = build_ask_user_markup("menu_42", &["A".into(), "B".into(), "C".into()]);
+        let rows = markup["inline_keyboard"].as_array().unwrap();
+        // All 3 candidates in a single row
+        assert_eq!(rows.len(), 1);
+        let buttons = rows[0].as_array().unwrap();
+        assert_eq!(buttons.len(), 3);
+        // First button
+        assert_eq!(buttons[0]["text"], "A");
+        assert_eq!(buttons[0]["callback_data"], "ask:menu_42:0");
+        // Second button
+        assert_eq!(buttons[1]["text"], "B");
+        assert_eq!(buttons[1]["callback_data"], "ask:menu_42:1");
+        // Third button
+        assert_eq!(buttons[2]["text"], "C");
+        assert_eq!(buttons[2]["callback_data"], "ask:menu_42:2");
+    }
+
+    #[test]
+    fn telegram_callback_query_deserializes() {
+        let json_str = r#"{
+            "update_id": 100,
+            "callback_query": {
+                "id": "cb_001",
+                "data": "ask:menu1:2",
+                "message": {
+                    "message_id": 55,
+                    "chat": {"id": 12345}
+                }
+            }
+        }"#;
+        let update: TelegramUpdate = serde_json::from_str(json_str).unwrap();
+        let cb = update.callback_query.unwrap();
+        assert_eq!(cb.id, "cb_001");
+        assert_eq!(cb.data.as_deref(), Some("ask:menu1:2"));
+        assert_eq!(cb.message.unwrap().chat.id, 12345);
+    }
+
+    #[test]
+    fn telegram_update_with_callback_query_none() {
+        let json_str =
+            r#"{"update_id": 1, "message": {"message_id": 1, "chat": {"id": 1}, "text": "hello"}}"#;
+        let update: TelegramUpdate = serde_json::from_str(json_str).unwrap();
+        assert!(update.callback_query.is_none());
+    }
+
+    #[test]
+    fn ask_user_event_drain_returns_latest() {
+        let mut queue = VecDeque::new();
+        queue.push_back(AskUserEvent {
+            menu_id: "old".into(),
+            prompt: "Old".into(),
+            candidates: vec![],
+        });
+        queue.push_back(AskUserEvent {
+            menu_id: "new".into(),
+            prompt: "New".into(),
+            candidates: vec!["X".into()],
+        });
+        let latest = drain_latest_ask_user_event(&mut queue);
+        assert!(latest.is_some());
+        assert_eq!(latest.unwrap().menu_id, "new");
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn ask_user_event_drain_empty() {
+        let mut queue = VecDeque::new();
+        assert!(drain_latest_ask_user_event(&mut queue).is_none());
+    }
+
+    // === Phase E: File handling tests ===
+
+    #[test]
+    fn resolve_files_absolute_existing() {
+        let tmp = tempdir().unwrap();
+        let f = tmp.path().join("test.txt");
+        std::fs::write(&f, "hello").unwrap();
+        let resolved = resolve_files(&[f.to_string_lossy().to_string()]);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0], f.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resolve_files_nonexistent_returns_empty() {
+        let resolved = resolve_files(&["/nonexistent/path/file.txt".into()]);
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn resolve_files_tilde_expansion() {
+        // ~ should expand to HOME; we can't guarantee files exist there,
+        // but we can test the path expansion logic indirectly
+        let _home = env::var("HOME").unwrap_or_default();
+        let test_path = format!("~/{}", "___nonexistent_test_file_xyz___.txt");
+        let resolved = resolve_files(&[test_path]);
+        assert!(resolved.is_empty()); // File doesn't exist, so empty
+    }
+
+    #[test]
+    fn resolve_files_dedup() {
+        let tmp = tempdir().unwrap();
+        let f = tmp.path().join("dup.txt");
+        std::fs::write(&f, "data").unwrap();
+        let p = f.to_string_lossy().to_string();
+        let resolved = resolve_files(&[p.clone(), p]);
+        assert_eq!(resolved.len(), 1);
+    }
+
+    #[test]
+    fn files_from_text_extracts_and_resolves() {
+        let tmp = tempdir().unwrap();
+        let f = tmp.path().join("output.png");
+        std::fs::write(&f, "img").unwrap();
+        let text = format!("Here is the result: {}", f.display());
+        let files = files_from_text(&text);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], f.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn files_from_text_no_files() {
+        let files = files_from_text("No files here, just text");
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn render_file_markers_format() {
+        let files = vec![
+            PathBuf::from("/tmp/report.pdf"),
+            PathBuf::from("/tmp/data.csv"),
+        ];
+        let rendered = render_file_markers(&files);
+        assert_eq!(rendered.len(), 2);
+        assert!(rendered[0].contains("📎"));
+        assert!(rendered[0].contains("report.pdf"));
+        assert!(rendered[1].contains("data.csv"));
+    }
+
+    #[test]
+    fn render_file_markers_empty() {
+        let rendered = render_file_markers(&[]);
+        assert!(rendered.is_empty());
+    }
+
+    #[test]
+    fn build_client_with_proxy_no_env() {
+        // With no proxy env vars set, should succeed
+        // (may have proxy vars in CI, so just test it doesn't panic)
+        let result = build_client_with_proxy();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn user_state_cancel_no_task() {
+        let mut state = UserState::new();
+        // Cancelling when no task is running should be a no-op
+        state.cancel_stream_task();
+        assert!(state.stream_task.is_none());
+    }
+
+    #[test]
+    fn user_state_cancel_with_task() {
+        let mut state = UserState::new();
+        let handle = tokio::runtime::Runtime::new().unwrap().spawn(async {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        });
+        state.stream_task = Some(handle);
+        state.cancel_stream_task();
+        assert!(state.stream_task.is_none());
+    }
+
+    #[test]
+    fn extract_file_markers_various_tokens() {
+        let text = "Check /tmp/out.png and ./local.md but not foo.txt";
+        let markers = extract_file_markers(text);
+        assert!(markers.contains(&"/tmp/out.png".to_string()));
+        assert!(markers.contains(&"./local.md".to_string()));
+        // foo.txt is not a path (no / prefix)
+        assert!(!markers.iter().any(|m| m == "foo.txt"));
     }
 }

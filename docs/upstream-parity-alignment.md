@@ -21,12 +21,12 @@ This document is the stage gate before continuing feature work. It maps upstream
 | `agentmain.py` | `crates/koda-agent-core`, `crates/koda-agent-cli` | Partial | Runtime, slash commands, task mode, logs, continue/new/resume are present. Background `--task`, `_history.json`, `_stop`, `reply.txt` are now closer. Still missing exact queue/thread display semantics and full CLI command parity. |
 | `agent_loop.py` | `crates/koda-agent-core` | Done/P0 | `StepOutcome`, turn loop, tool dispatch, tool-result adjacency, stop handling, no-tool retry, plan intercept, runtime event stream implemented. |
 | `ga.py` | `crates/koda-agent-tools`, `crates/koda-agent-core` | Partial | 9 atomic tools plus 2 memory tools implemented. Browser/file/code behavior is broad. Remaining gap is exact generator-yield streaming and some upstream browser monitor text details. |
-| `llmcore.py` | `crates/koda-agent-llm`, `crates/koda-agent-core` | Partial | Chat Completions, Responses, Claude Messages, DeepSeek reasoning replay, retries, per-model options, custom headers, proxy, Mixin-like failover, and optional legacy `mykey.py`/`mykey.json` import are implemented. Remaining gaps: exact provider-specific cache marker edge fixtures and more provider-specific option mappings. |
+| `llmcore.py` | `crates/koda-agent-llm`, `crates/koda-agent-core` | Done/P1 | Chat Completions, Responses, Claude Messages, DeepSeek reasoning replay, retries, per-model options, custom headers, proxy, Mixin-like failover, optional legacy `mykey.py`/`mykey.json` import, and profile-based LLM configuration (`config/llms.toml` with layered profile→model resolution) are implemented. Remaining gaps: exact provider-specific cache marker edge fixtures and more provider-specific option mappings. |
 | `simphtml.py` | `crates/koda-agent-tools`, `assets/simphtml_*.js` | Partial | HTML simplification, list detection asset, smart truncation, DOM diff, rich JS monitor are implemented. Remaining gap: exact BeautifulSoup scoring/truncation parity and all rich monitor edge messages. |
 | `TMWebDriver.py` + `assets/tmwd_cdp_bridge` | `crates/koda-agent-frontends`, `assets/tmwd_cdp_bridge` | Partial | WS + HTTP longpoll master, bridge commands, batch `$N.path`, extension config generation, CDP fallback implemented. Remaining gap: broader manual website edge cases beyond the automated local-page matrix, such as provider-specific autofill/password-manager prompts and download shelf UI details. |
 | `frontends/genericagent_acp_bridge.py` | `crates/koda-agent-frontends` | Partial | ACP JSONL initialize/session/prompt/cancel/stop/shutdown and upstream-shaped session updates implemented; protocol fixture coverage added for init/errors/content blocks/active prompt/cancel. Need broader client interoperability smoke. |
-| `frontends/tuiapp.py` | `crates/koda-agent-cli` | Partial/P2 | Multi-session line-mode TUI commands exist with a sidebar-like session panel, branch/switch/rename/rewind/fold/history/tail/view/search commands, and input history. Experimental `koda-agent tui --full` now provides a Ratatui full-screen layout with real per-session runtime creation, multiline composer input, async `AgentEvent` timeline updates, stop action, keyboard scrollback, branch/close/clear/rename/switch local session commands, help overlay, command palette, structured timeline markers, last-tool inspector detail, background unread/completion/failure notifications, and TestBackend coverage. Missing heavyweight editor widget, mouse support, memory/browser inspector panes, and final default-entry stability hardening. |
-| `frontends/tgapp.py`, `fsapp.py`, `wecomapp.py`, `dingtalkapp.py` | `crates/koda-agent-frontends` | Partial/P2 | Telegram polling/basic send and Feishu/WeCom/DingTalk webhook parsing/signature/reply scaffolds exist. Missing encrypted callbacks, upload/download, streaming edit, buttons/ask_user UI. |
+| `frontends/tuiapp.py` | `crates/koda-agent-cli` | Partial/P2 | Multi-session line-mode TUI commands exist with a sidebar-like session panel, branch/switch/rename/rewind/fold/history/tail/view/search commands, and input history. Experimental `koda-agent tui --full` now provides a Ratatui full-screen layout with real per-session runtime creation, multiline composer input, async `AgentEvent` timeline updates, stop action, keyboard scrollback, branch/close/clear/rename/switch local session commands, help overlay, command palette, structured timeline markers, last-tool inspector detail, background unread/completion/failure notifications, ToggleMouseCapture (F7/Ctrl-M) with mode indicator, improved `ask_user` interaction flow, and TestBackend coverage. Missing heavyweight editor widget, memory/browser inspector panes, and final default-entry stability hardening. |
+| `frontends/tgapp.py`, `fsapp.py`, `wecomapp.py`, `dingtalkapp.py` | `crates/koda-agent-frontends` | Partial/P2 | Telegram: streaming edit (MarkdownV2 + rate limit + code-fence line buffering), inline buttons (ask_user callback routing with menu_id, clear_markup on completion/timeout), file/image send (resolve_files + multipart upload + text fallback), 4 commands (/abort, /continue, /btw, /debug), proxy support (HTTPS_PROXY/HTTP_PROXY/ALL_PROXY), UserState stream_task handle management, TurnStreamCoordinator segment buffer with ≤50-line tail extraction — **65 unit tests**. Feishu/WeCom/DingTalk: webhook parsing/signature/reply scaffolds exist. Missing: Feishu/WeCom/DingTalk encrypted callbacks, upload/download. |
 | `frontends/qqapp.py`, `wechatapp.py`, `qtapp.py`, `stapp*.py`, `desktop_pet*.pyw`, `hub.pyw`, `launch.pyw` | `crates/koda-agent-frontends` or future GUI crate | Missing/P2 | Only web/HTTP basic UI exists. Need platform feature gates before adding heavy GUI/IM dependencies. |
 | `memory/*.md`, `memory/*.py` | `memory/`, `crates/koda-agent-memory` | Partial | SOP/resources migrated; ADB/OCR/keychain helpers, L4 compression, structured and assisted L1/L2/L3 settlement exist. Remaining gaps are stricter L1/L3 validation and autonomous memory hooks. |
 | `reflect/*.py` | `crates/koda-agent-cli`, future scheduler | Partial | `--reflect` Python protocol, native JSON rules, native scheduler scan of `sche_tasks/*.json`, native goal/autonomous modes, native agent-team worker polling, and L4 cron are implemented. State writes are atomic, corrupt state is backed up/reset, and agent-team external-service failures now skip/log like upstream. Remaining gaps are richer fixture comparison and long-running external-service soak tests. |
@@ -177,16 +177,30 @@ Remaining priority:
 
 1. ACP interoperability with an actual codeg/ACP host beyond the local JSONL client smoke.
 2. TUI mouse/full-screen Textual-like rendering and concurrent live session display.
-3. Telegram streaming edit, inline buttons, file/image support.
-4. Feishu/WeCom/DingTalk encrypted callback + file/reply parity.
+3. ~~Telegram streaming edit, inline buttons, file/image support.~~ **Done** (65 tests, Phases A-E commits). Remaining: Feishu/WeCom/DingTalk encrypted callback + file/reply parity.
+4. Feishu/WeCom/DingTalk encrypted callback + file/reply parity (next IM target).
 5. QQ/WeChat/native desktop/Qt/Streamlit/desktop pet feature-gated ports.
 
 ## Next Work Order
 
-1. Extend Phase 5 from automated matrix into selected real-site manual cases: provider-specific autofill/password-manager prompts, download shelf UI behavior, and complex cross-origin iframe workflows.
+1. ~~Extend Phase 5 from automated matrix into selected real-site manual cases: provider-specific autofill/password-manager prompts, download shelf UI behavior, and complex cross-origin iframe workflows.~~ **Phase 2 LLM core parity is now Done/P1** with profile-based configuration completed.
 2. Add ACP protocol fixture comparison and improve TUI layout/session display.
-3. Continue IM/frontend breadth: Telegram streaming/buttons/files, Feishu/WeCom/DingTalk encrypted callbacks and files.
+3. ~~Continue IM/frontend breadth: Telegram streaming/buttons/files, Feishu/WeCom/DingTalk encrypted callbacks and files.~~ **Telegram Done** (Phases A-E, 65 tests). Next: Feishu/WeCom/DingTalk encrypted callbacks and file parity.
 4. Add optional tracing integration and final real-LLM smoke matrix.
+5. Update Phase 5 browser bridge with broader manual website edge cases (provider-specific autofill, download shelf UI).
+
+---
+
+## Document Maintenance
+
+**Last updated**: 2026-05-13  
+**Updated by**: Automatic review & manual update  
+**Changes made**:
+- Phase 2 (LLM Core): `Partial` → `Done/P1` — Profile-based LLM configuration (`config/llms.toml`) implemented with layered profile→model resolution
+- Phase 6 (TUI): Added ToggleMouseCapture (F7/Ctrl-M) and improved `ask_user` interaction to feature list
+- Telegram (IM): `Partial/P2` → Telegram portion **Done** — Phase A: send_tg_md2 + extract_feishu/wecom_json_text; Phase B: MarkdownV2 complete parser (6 sub-functions); Phase C: StreamSession + TurnStreamCoordinator + send_tg_md2 fallback; Phase D: command routing (/abort /continue /btw /debug) + ask_user inline buttons (7 functions); Phase E: file handling pipeline + proxy + UserState. **65 unit tests**, 0 failures. Feishu/WeCom/DingTalk remain Partial/P2.
+
+**Next review due**: 2026-05-18 (or after significant feature merges)
 
 ## Current Non-Goals / Intentional Differences
 

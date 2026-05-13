@@ -1,0 +1,24 @@
+# docs/telegram-integration-plan.md 结构摘要
+
+**文档**: 301行 | **日期**: 2026-05-13 | **标题**: Telegram Frontend Integration Plan
+
+## 章节结构
+
+| 章节 | 行号 | 内容 |
+|------|------|------|
+| §1 现状分析 | L9-L56 | 1.1 当前Rust实现(L1682-1869, 190行), 1.2 上游tgapp.py能力(982行), 1.3 AgentRuntime接口(同步/流式/事件类型) |
+| §2 目标分层架构 | L59-L190 | 架构图(3层: Bot/Session/Shared), 2.1分阶段交付: P0流式编辑(核心循环代码), P1 Inline Buttons+Callback(ask_user路由), P2文件/图片/BotCommand/typing |
+| §3 文件拆分评估 | L194-L265 | 3.1 lib.rs当前结构(2412行, 7个区域), 3.2拆分方案(5模块+shared.rs), 3.3迁移策略(骨架代码) |
+| §4 实施步骤 | L269-L278 | 6步时间表(拆分1h→P0 2h→P1 1.5h→P2 1h→测试1h→文档0.5h) |
+| §5 风险与决策点 | L282-L290 | 5项风险: rate limit, MarkdownV2 fallback, callback超时, 编译错误, 多chat并发 |
+| §6 对齐状态 | L294-L301 | 当前Partial/P2, 目标Partial+/P2, 需更新3处 |
+
+## 缺失章节(待A2补充)
+
+- ❌ §2.5 MarkdownV2 Parser 设计 (正则解析器, entity类型映射)
+- ❌ §3.3 StreamSession 类 (segment buffer, draft_id, 编辑节流)
+- ❌ §3.4 TurnStreamCoordinator (turn标记, 行缓冲, 代码围栏)
+- ❌ §4.5 ask_user事件队列 (drain_latest, normalize_menu, callback_data解析)
+- ❌ §5.3 命令路由扩展 (/abort, /continue, /btw, /debug, 别名表)
+- ❌ §6.3 基础设施 (Proxy, stream_task句柄, 文件路径解析链, ensure_single_instance)
+- ❌ §7 实现路线图 (4阶段交付+验证方式)

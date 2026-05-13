@@ -6553,6 +6553,11 @@ mod tests {
 
     #[test]
     fn config_setup_from_env_reads_workspace_env_file() {
+        // Clear MIMO_API_KEY from process env so env_value_available_any
+        // falls through to the workspace .env file on disk.
+        let _saved_mimo = std::env::var("MIMO_API_KEY").ok();
+        unsafe { std::env::remove_var("MIMO_API_KEY") };
+
         let d = tempfile::tempdir().unwrap();
         let root = d.path().join("workspace");
         let home = d.path().join("home");
@@ -6817,6 +6822,13 @@ id = "mimo-v2.5-pro"
 
     #[test]
     fn config_model_add_list_use_set_and_remove() {
+        // Clear KODA_LLM_PROFILE / KODA_LLM_MODEL from process env so
+        // env_value_available_any does not leak real values into the test.
+        let _saved_profile = std::env::var("KODA_LLM_PROFILE").ok();
+        let _saved_model = std::env::var("KODA_LLM_MODEL").ok();
+        unsafe { std::env::remove_var("KODA_LLM_PROFILE") };
+        unsafe { std::env::remove_var("KODA_LLM_MODEL") };
+
         let d = tempfile::tempdir().unwrap();
         let root = d.path().join("workspace");
         let home = d.path().join("home");
