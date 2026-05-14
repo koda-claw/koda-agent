@@ -9,8 +9,24 @@ use super::state::{
     UsageStats,
 };
 
-const MAX_HISTORY_SESSIONS: usize = 8;
+const DEFAULT_MAX_HISTORY_SESSIONS: usize = 24;
 const MAX_HISTORY_LINES: usize = 60;
+
+fn get_max_history_sessions() -> usize {
+    // 优先从环境变量读取，其次从命令行参数读取，最后使用默认值
+    if let Ok(val) = std::env::var("KODA_MAX_HISTORY_SESSIONS") {
+        if let Ok(n) = val.parse() {
+            return n;
+        }
+    }
+    // 命令行参数通过环境变量KODA_CLI_MAX_SESSIONS传递
+    if let Ok(val) = std::env::var("KODA_CLI_MAX_SESSIONS") {
+        if let Ok(n) = val.parse() {
+            return n;
+        }
+    }
+    DEFAULT_MAX_HISTORY_SESSIONS
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct LoadedHistorySession {
@@ -44,17 +60,20 @@ pub(super) fn load_recent_history_sessions(
     };
     paths.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
 
-    // 按session ID去重，保留最新的（文件名排序后第一个）
+    // 按PID（session ID最后一段数字）去重，保留最新的（文件名排序后第一个）
+    // session ID格式: session_YYYYMMDD_HHMMSS_PID
     let mut seen = std::collections::HashSet::new();
     paths
         .into_iter()
         .filter_map(|path| load_history_session_file(&path).ok())
         .filter(|raw| !raw.history.is_empty() || !raw.messages.is_empty())
         .filter(|raw| {
-            let key = raw.session.clone().unwrap_or_default();
-            seen.insert(key) // insert返回true表示首次出现
+            let session = raw.session.clone().unwrap_or_default();
+            // 提取PID（最后一段数字），如 session_20260514_174506_62448 -> 62448
+            let pid = session.split('_').last().unwrap_or(&session).to_string();
+            seen.insert(pid) // 按PID去重，首次出现保留
         })
-        .take(MAX_HISTORY_SESSIONS)
+        .take(get_max_history_sessions())
         .enumerate()
         .map(|(idx, raw)| history_session_to_tui(raw, start_id + idx))
         .collect()
@@ -144,21 +163,44 @@ fn history_session_title(session: &str) -> String {
 }
 
 fn history_prompt_title(history: &[String], created_at: Option<&str>) -> Option<String> {
+    // 生成相对时间前缀
     let time_prefix = created_at
-        .and_then(|s| s.get(5..16)) // "2026-05-11T12:04" → "05-11T12:04"
-        .map(|s| s.replace('T', " "))
-        .unwrap_or_default();
+        .and_then(|s| {
+            // 解析 ISO 时间 "2026-05-11T12:04:06.551842+08:00"
+            let dt = chrono::DateTime::parse_from_rfc3339(s).ok()?;
+            let now = chrono::Local::now();
+            let local_dt = dt.with_timezone(&chrono::Local);
+            let duration = now.signed_duration_since(local_dt);
+            
+            // 提取 HH:MM
+            let time_str = local_dt.format("%H:%M").to_string();
+            
+            // 生成相对时间文本
+            let relative = if duration.num_days() == 0 {
+                format!("今天 {time_str}")
+            } else if duration.num_days() == 1 {
+                format!("昨天 {time_str}")
+            } else if duration.num_days() == 2 {
+                format!("前天 {time_str}")
+            } else if duration.num_days() < 7 {
+                format!("{}天前", duration.num_days())
+            } else if duration.num_days() < 30 {
+                format!("{}周前", duration.num_days() / 7)
+            } else {
+                // 超过30天显示日期
+                local_dt.format("%m-%d").to_string()
+            };
+            Some(relative)
+        })
+        .unwrap_or_else(|| "未知时间".to_string());
+    
     history.iter().find_map(|line| {
         let prompt = line.trim().strip_prefix("[USER]:")?.trim();
         if prompt.is_empty() {
             None
         } else {
             let title = compact_title(prompt);
-            if time_prefix.is_empty() {
-                Some(trim_chars(&format!("hist {title}"), 32))
-            } else {
-                Some(trim_chars(&format!("{time_prefix} {title}"), 32))
-            }
+            Some(trim_chars(&format!("{time_prefix} {title}"), 32))
         }
     })
 }

@@ -3,6 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent
 use koda_agent_core::{AgentConfig, AgentRuntime};
 use ratatui::layout::Rect;
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use super::build_runtime;
 use super::render::{
@@ -41,8 +42,18 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
     if key.kind == KeyEventKind::Release {
         return KeyAction::None;
     }
-    if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('q') {
-        return KeyAction::Quit;
+    // Ctrl+C double-press quit (2 second window)
+    if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
+        let now = Instant::now();
+        if let Some(first) = state.ctrl_c_pending {
+            if now.duration_since(first) < Duration::from_secs(2) {
+                state.ctrl_c_pending = None;
+                return KeyAction::Quit;
+            }
+        }
+        state.ctrl_c_pending = Some(now);
+        state.status = "press Ctrl+C again within 2s to quit".into();
+        return KeyAction::None;
     }
     if state.overlay != Overlay::None {
         match (key.modifiers, key.code) {
@@ -67,9 +78,6 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
         return KeyAction::None;
     }
     match (key.modifiers, key.code) {
-        (_, KeyCode::Esc) => {
-            return KeyAction::Quit;
-        }
         (_, KeyCode::Char('?')) if state.composer.is_empty() => {
             state.overlay = Overlay::Help;
             state.status = "opened help".into();
@@ -155,7 +163,6 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
                 FocusPane::Sessions => FocusPane::Composer,
             };
         }
-        (_, KeyCode::Char('q')) if state.composer.is_empty() => return KeyAction::Quit,
         (_, KeyCode::Char('n')) if state.composer.is_empty() => return KeyAction::NewSession,
         (_, KeyCode::Char(ch)) if state.composer.is_empty() && ch.is_ascii_digit() => {
             if let Some(answer) = pending_ask_choice(state, ch) {

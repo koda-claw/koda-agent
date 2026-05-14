@@ -8,11 +8,14 @@ Koda Agent 提供两种终端交互模式：稳定 line-mode 和实验性 full-s
 koda-agent tui
 koda-agent tui --line
 koda-agent tui --full
+koda-agent tui --max-sessions 20
+koda-agent tui --full --max-sessions 10
 ```
 
 - `tui`：默认稳定 line-mode。
 - `tui --line`：强制 line-mode。
 - `tui --full`：启动全屏 TUI。
+- `tui --max-sessions <N>`：加载历史会话数量，默认 24，覆盖 `KODA_MAX_HISTORY_SESSIONS` 环境变量。
 
 如果终端不是 TTY，全屏 TUI 会返回清晰错误，不会输出鼠标控制序列污染终端。
 

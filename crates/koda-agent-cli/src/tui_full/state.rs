@@ -50,6 +50,8 @@ pub(super) struct TuiAppState {
     pub(super) last_layout: Option<AppLayout>,
     pub(super) tick: u64,
     pub(super) max_turns: Option<u64>,
+    /// Ctrl+C double-press quit: records time of first press
+    pub(super) ctrl_c_pending: Option<Instant>,
 }
 
 impl TuiAppState {
@@ -111,12 +113,13 @@ impl TuiAppState {
             next_id: 2,
             focus: FocusPane::Composer,
             layout_mode: LayoutMode::Wide,
-            status: "ready | Enter submit | Ctrl-S stop | Ctrl-Q/Esc quit | Tab focus".into(),
+            status: "ready | Enter submit | Ctrl-S stop | Ctrl-C×2 quit | Tab focus".into(),
             composer: String::new(),
             overlay: Overlay::None,
             last_layout: None,
             tick: 0,
             max_turns,
+            ctrl_c_pending: None,
         }
     }
 

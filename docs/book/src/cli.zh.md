@@ -208,11 +208,14 @@ koda-agent memory l4-archive --run
 koda-agent tui
 koda-agent tui --full
 koda-agent tui --line
+koda-agent tui --max-sessions 20
+koda-agent tui --full --max-sessions 10
 ```
 
 - `tui`：稳定 line-mode。
 - `tui --full`：全屏 Ratatui UI。
 - `tui --line`：强制 line-mode。
+- `tui --max-sessions <N>`：加载历史会话数量，默认 24，覆盖 `KODA_MAX_HISTORY_SESSIONS` 环境变量。
 
 ## goal
 

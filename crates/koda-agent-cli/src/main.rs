@@ -200,6 +200,11 @@ enum CliCommand {
             help = "Maximum agent turns for TUI session; overrides KODA_MAX_TURNS env var"
         )]
         max_turns: Option<u64>,
+        #[arg(
+            long = "max-sessions",
+            help = "Maximum history sessions to load in sidebar; overrides KODA_MAX_HISTORY_SESSIONS env var"
+        )]
+        max_sessions: Option<usize>,
     },
     #[command(about = "Run a self-driving Goal Mode session until budget is exhausted")]
     Goal {
@@ -687,11 +692,17 @@ async fn main() -> Result<()> {
             full,
             line,
             max_turns,
+            max_sessions,
         }) => {
             if let Some(limit) = max_turns {
                 // SAFETY: single-threaded startup, no concurrent env reads yet
                 unsafe {
                     std::env::set_var("KODA_MAX_TURNS", limit.to_string());
+                }
+            }
+            if let Some(n) = max_sessions {
+                unsafe {
+                    std::env::set_var("KODA_CLI_MAX_SESSIONS", n.to_string());
                 }
             }
             if full || (!line && env_flag_enabled("KODA_TUI_FULL")) {
