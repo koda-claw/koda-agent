@@ -797,7 +797,10 @@ impl AgentConfig {
                 if idx == selected_idx && alias == selected_model {
                     continue;
                 }
-                llm_configs.push(profile_to_model_config(profile, alias, defaults)?);
+                match profile_to_model_config(profile, alias, defaults) {
+                    Ok(config) => llm_configs.push(config),
+                    Err(e) => eprintln!("warning: skipping fallback profile model: {e}"),
+                }
             }
         }
         let mixin = toml_root.and_then(load_mixin_config).unwrap_or_default();
@@ -1692,13 +1695,20 @@ pub fn redact_secret(s: &str) -> String {
     }
 }
 
+fn has_api_version(url: &str) -> bool {
+    // Check if the last path segment is a version like /v1, /v2, /v4, etc.
+    url.rsplit('/')
+        .next()
+        .is_some_and(|seg| seg.starts_with('v') && seg.len() > 1 && seg[1..].bytes().all(|b| b.is_ascii_digit()))
+}
+
 pub fn auto_make_url(base: &str, path: &str) -> String {
     let base = base.trim_end_matches('/');
     if base.ends_with(path) {
         base.to_string()
     } else if base.ends_with("/v1") {
         format!("{base}/{path}")
-    } else if path == "chat/completions" && !base.contains("/v1") {
+    } else if (path == "chat/completions" || path == "messages" || path == "responses") && !has_api_version(base) {
         format!("{base}/v1/{path}")
     } else {
         format!("{base}/{path}")
@@ -3087,6 +3097,7 @@ impl AgentRuntime {
         };
         append_model_log(&self.cfg, "Prompt", &prompt_snapshot)?;
         let mut long_term_reminded = false;
+        let mut consecutive_blank_turns = 0u32;
 
         for turn in 1..=self.cfg.max_turns {
             if consume_file(&self.cfg.temp_dir, "_stop").is_some() {
@@ -3160,6 +3171,11 @@ impl AgentRuntime {
                     continue;
                 }
                 if let Some(next_prompt) = no_tool_next_prompt(&response) {
+                    consecutive_blank_turns += 1;
+                    if consecutive_blank_turns >= 3 {
+                        out.push_str(&format!("\n[Error] 连续 {} 轮空响应/无工具调用，疑似第三方API解析异常，强制终止循环。response.content前200字: {}\n", consecutive_blank_turns, &response.content.chars().take(200).collect::<String>()));
+                        break;
+                    }
                     out.push_str("\n[Info] No-tool response requires another turn.\n");
                     self.messages.lock().push(ChatMessage {
                         role: "user".into(),
@@ -3194,6 +3210,7 @@ impl AgentRuntime {
                 });
                 break;
             }
+            consecutive_blank_turns = 0;
             let mut next_prompts = Vec::new();
             let mut tool_results = Vec::new();
             for (idx, tc) in response.tool_calls.iter().enumerate() {
@@ -3914,17 +3931,35 @@ id = "mimo"
 
     #[test]
     fn url_building_matches_openai_compat() {
+        // bare base → auto-insert /v1
         assert_eq!(
             auto_make_url("http://x:1", "chat/completions"),
             "http://x:1/v1/chat/completions"
         );
+        // already has /v1
         assert_eq!(
             auto_make_url("http://x:1/v1", "chat/completions"),
             "http://x:1/v1/chat/completions"
         );
+        // already contains path → no double
         assert_eq!(
             auto_make_url("http://x:1/v1/chat/completions", "chat/completions"),
             "http://x:1/v1/chat/completions"
+        );
+        // ZhipuAI /v4 path — must NOT inject /v1 (#2)
+        assert_eq!(
+            auto_make_url("https://open.bigmodel.cn/api/paas/v4", "chat/completions"),
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        );
+        // other /vN providers
+        assert_eq!(
+            auto_make_url("http://localhost:8080/v2", "chat/completions"),
+            "http://localhost:8080/v2/chat/completions"
+        );
+        // non-chat path → no /v1 injection regardless
+        assert_eq!(
+            auto_make_url("http://x:1", "audio/speech"),
+            "http://x:1/audio/speech"
         );
     }
 

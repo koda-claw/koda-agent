@@ -554,6 +554,7 @@ impl OpenAiClient {
         }
         let messages = trim_messages_history(messages);
         if self.cfg.llm_api_style.eq_ignore_ascii_case("claude")
+            || self.cfg.llm_api_style.eq_ignore_ascii_case("native_claude")
             || self.cfg.llm_api_style.eq_ignore_ascii_case("messages")
         {
             return self.claude_messages(&messages, tools_schema, emit).await;
@@ -1165,7 +1166,11 @@ fn apply_auth_header(
     cfg: &AgentConfig,
 ) -> reqwest::RequestBuilder {
     let scheme = cfg.auth_scheme.as_deref().unwrap_or_else(|| {
-        if cfg.llm_api_style == "claude" && cfg.openai_api_key.starts_with("sk-ant-") {
+        let is_claude_style = cfg.llm_api_style == "claude" || cfg.llm_api_style == "native_claude";
+        if is_claude_style && cfg.openai_api_key.starts_with("sk-ant-") {
+            "x-api-key"
+        } else if is_claude_style {
+            // native_claude with non-Anthropic keys (e.g. GLM) still needs x-api-key
             "x-api-key"
         } else {
             "bearer"
@@ -2313,7 +2318,21 @@ pub fn parse_claude_messages_json(body: &Value) -> Result<AgentResponse> {
                     });
                 }
             }
-            _ => {}
+            other => {
+                // Fallback: third-party Anthropic-compatible providers may use non-standard
+                // block types (e.g. "output_text" instead of "text"). Extract any text field.
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        content.push_str(text);
+                    }
+                }
+                if !other.is_empty() {
+                    eprintln!(
+                        "[warn] Unknown Claude content block type: {other}, raw: {}",
+                        serde_json::to_string(&block).unwrap_or_default()
+                    );
+                }
+            }
         }
     }
     Ok(AgentResponse {
@@ -2393,7 +2412,16 @@ pub fn parse_claude_sse_lines(lines: &[&str]) -> Result<AgentResponse> {
                             partial_json[idx].push_str(partial);
                         }
                     }
-                    _ => {}
+                    other => {
+                        // Fallback: third-party Anthropic-compatible providers may use
+                        // non-standard delta types. Extract any text field found.
+                        if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                            content.push_str(text);
+                        }
+                        if !other.is_empty() {
+                            eprintln!("[warn] Unknown Claude delta type: {other}, raw: {}", serde_json::to_string(&delta).unwrap_or_default());
+                        }
+                    }
                 }
             }
             _ => {}
@@ -3157,5 +3185,108 @@ mod tests {
         assert_eq!(r.tool_calls.len(), 2);
         assert_eq!(r.tool_calls[0].args["path"], "a.txt");
         assert_eq!(r.tool_calls[1].args["path"], "fallback.txt");
+    }
+
+    /// Integration test: call GLM via native_claude API style end-to-end.
+    /// Reads ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY / ANTHROPIC_MODEL from .env.
+    /// Skipped if env vars are not set.
+    #[tokio::test]
+    async fn integration_glm_native_claude_non_stream() {
+        let base_url = match std::env::var("ANTHROPIC_BASE_URL") {
+            Ok(v) => v.trim_matches('"').to_string(),
+            Err(_) => {
+                eprintln!("ANTHROPIC_BASE_URL not set, skipping integration test");
+                return;
+            }
+        };
+        let api_key = match std::env::var("ANTHROPIC_API_KEY") {
+            Ok(v) => v.trim_matches('"').to_string(),
+            Err(_) => {
+                eprintln!("ANTHROPIC_API_KEY not set, skipping integration test");
+                return;
+            }
+        };
+        let model = match std::env::var("ANTHROPIC_MODEL") {
+            Ok(v) => v.trim_matches('"').to_string(),
+            Err(_) => "GLM-4.7".to_string(),
+        };
+
+        let cfg = make_test_cfg(&base_url, &api_key, &model, false);
+        let llm = MultiLlmClient::new(cfg);
+        let messages = vec![ChatMessage::text("user", "Reply with exactly: HELLO_TEST")];
+        let resp = llm.chat(&messages, &json!([])).await.expect("GLM native_claude chat failed");
+
+        assert!(!resp.content.is_empty(), "GLM returned empty content via native_claude");
+        println!("GLM native_claude response: {}", resp.content);
+        println!("GLM raw response keys: {:?}", resp.raw.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+    }
+
+    /// Integration test: call GLM via native_claude with SSE streaming.
+    #[tokio::test]
+    async fn integration_glm_native_claude_stream() {
+        let base_url = match std::env::var("ANTHROPIC_BASE_URL") {
+            Ok(v) => v.trim_matches('"').to_string(),
+            Err(_) => {
+                eprintln!("ANTHROPIC_BASE_URL not set, skipping integration test");
+                return;
+            }
+        };
+        let api_key = match std::env::var("ANTHROPIC_API_KEY") {
+            Ok(v) => v.trim_matches('"').to_string(),
+            Err(_) => {
+                eprintln!("ANTHROPIC_API_KEY not set, skipping integration test");
+                return;
+            }
+        };
+        let model = match std::env::var("ANTHROPIC_MODEL") {
+            Ok(v) => v.trim_matches('"').to_string(),
+            Err(_) => "GLM-4.7".to_string(),
+        };
+
+        let cfg = make_test_cfg(&base_url, &api_key, &model, true);
+        let llm = MultiLlmClient::new(cfg);
+        let messages = vec![ChatMessage::text("user", "Reply with exactly: STREAM_TEST")];
+        let resp = llm.chat(&messages, &json!([])).await.expect("GLM native_claude stream failed");
+
+        assert!(!resp.content.is_empty(), "GLM returned empty content via native_claude stream");
+        println!("GLM native_claude stream response: {}", resp.content);
+    }
+
+    /// Helper to build an AgentConfig for integration tests with all required fields.
+    fn make_test_cfg(base_url: &str, api_key: &str, model: &str, stream: bool) -> AgentConfig {
+        AgentConfig {
+            home_dir: ".".into(),
+            workspace_dir: ".".into(),
+            resource_dir: ".".into(),
+            root_dir: ".".into(),
+            temp_dir: "temp".into(),
+            memory_dir: "memory".into(),
+            logs_dir: "logs".into(),
+            sessions_dir: "sessions".into(),
+            browser_dir: "browser".into(),
+            openai_base_url: base_url.to_string(),
+            openai_api_key: api_key.to_string(),
+            openai_model: model.to_string(),
+            llm_api_style: "native_claude".into(),
+            auth_scheme: None,
+            auth_header: None,
+            max_turns: 1,
+            verbose: false,
+            stream,
+            timeout_secs: 60,
+            connect_timeout_secs: 30,
+            verify_tls: false,
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: None,
+            thinking_type: None,
+            thinking_budget_tokens: None,
+            service_tier: None,
+            proxy: None,
+            failover: false,
+            custom_headers: Default::default(),
+            mixin: Default::default(),
+            llm_configs: vec![],
+        }
     }
 }

@@ -62,6 +62,11 @@ struct Args {
     #[arg(long, help = "Prompt text for one-shot execution")]
     input: Option<String>,
     #[arg(
+        long = "max-turns",
+        help = "Maximum agent turns for one-shot mode; overrides KODA_MAX_TURNS env var"
+    )]
+    max_turns: Option<u64>,
+    #[arg(
         long = "reflect",
         alias = "reflect-rule",
         help = "Reflect script/rule: poll Python check() or native JSON rule and feed triggered tasks"
@@ -190,6 +195,11 @@ enum CliCommand {
         full: bool,
         #[arg(long, conflicts_with = "full", help = "Use the stable line-mode TUI")]
         line: bool,
+        #[arg(
+            long = "max-turns",
+            help = "Maximum agent turns for TUI session; overrides KODA_MAX_TURNS env var"
+        )]
+        max_turns: Option<u64>,
     },
     #[command(about = "Run a self-driving Goal Mode session until budget is exhausted")]
     Goal {
@@ -673,7 +683,11 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&hits)?);
             return Ok(());
         }
-        Some(CliCommand::Tui { full, line }) => {
+        Some(CliCommand::Tui { full, line, max_turns }) => {
+            if max_turns.is_some() {
+                // SAFETY: single-threaded startup, no concurrent env reads yet
+                unsafe { std::env::set_var("KODA_MAX_TURNS", max_turns.unwrap().to_string()); }
+            }
             if full || (!line && env_flag_enabled("KODA_TUI_FULL")) {
                 return tui_full::run_tui_full(cfg).await;
             }
@@ -719,8 +733,12 @@ async fn main() -> Result<()> {
         return run_reflect_mode(runtime, cfg, rule).await;
     }
     if let Some(task) = args.task {
-        run_task_mode(runtime, cfg, task, args.input).await
+        run_task_mode(runtime, cfg, task, args.input, args.max_turns).await
     } else {
+        if let Some(mt) = args.max_turns {
+            // SAFETY: single-threaded startup, no concurrent env reads yet
+            unsafe { std::env::set_var("KODA_MAX_TURNS", mt.to_string()); }
+        }
         let input = args
             .input
             .context("provide --input, --task, or a subcommand")?;
@@ -5663,6 +5681,7 @@ async fn run_task_mode(
     cfg: AgentConfig,
     task: String,
     input: Option<String>,
+    max_turns: Option<u64>,
 ) -> Result<()> {
     let dir = task_dir(&cfg, &task);
     fs::create_dir_all(&dir)?;
@@ -5696,7 +5715,15 @@ async fn run_task_mode(
     let mut raw =
         fs::read_to_string(&infile).with_context(|| format!("read {}", infile.display()))?;
     let mut round = String::new();
+    let mut turn_count: u64 = 0;
     loop {
+        turn_count += 1;
+        if let Some(limit) = max_turns {
+            if turn_count > limit {
+                eprintln!("[max-turns] reached turn limit ({limit}), stopping");
+                break;
+            }
+        }
         if dir.join("_stop").exists() {
             runtime.abort();
         }

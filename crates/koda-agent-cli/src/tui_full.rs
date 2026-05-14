@@ -283,6 +283,9 @@ fn submit_active_task(
         session.usage.current_turn = None;
         session.usage.unavailable = false;
         session.stream_metrics = Default::default();
+        session.session_started_at = Some(std::time::Instant::now());
+        session.turn_started_at = None;
+        session.last_turn_elapsed = None;
         session.push_timeline(TimelineItem::User(prompt.clone()));
         session.timeline_follow_tail = true;
         session.timeline_unseen = 0;
@@ -443,6 +446,7 @@ fn apply_agent_event(session: &mut TuiSessionState, event: &AgentEvent, tick: u6
         }
         AgentEvent::TurnStarted { turn } => {
             session.active_turn = Some(*turn);
+            session.turn_started_at = Some(std::time::Instant::now());
             session.stream_state = StreamState::Idle;
             session.push_timeline(TimelineItem::System(format!("LLM Running (Turn {turn})")));
         }
@@ -530,9 +534,13 @@ fn apply_agent_event(session: &mut TuiSessionState, event: &AgentEvent, tick: u6
             }
         }
         AgentEvent::TurnFinished { stop_reason, .. } => {
+            if let Some(start) = session.turn_started_at.take() {
+                session.last_turn_elapsed = Some(start.elapsed());
+            }
             session.active_turn = None;
             session.push_timeline(TimelineItem::System(format!(
-                "turn finished: {stop_reason}"
+                "turn finished: {stop_reason} ({:.1}s)",
+                session.last_turn_elapsed.map(|d| d.as_secs_f64()).unwrap_or(0.0)
             )));
         }
         AgentEvent::Stopped => {

@@ -943,12 +943,32 @@ fn command_palette_lines() -> Vec<Line<'static>> {
 }
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, state: &TuiAppState) {
+    let (turn_info, timer_info) = if let Some(session) = state.sessions.get(&state.active) {
+        let cur = session.active_turn.unwrap_or(0);
+        let turn_str = match state.max_turns {
+            Some(max) => format!(" | turn:{}/{}", cur, max),
+            None => format!(" | turn:{}", cur),
+        };
+        let timer_str = if let Some(start) = session.session_started_at {
+            let elapsed = start.elapsed().as_secs();
+            let mm = elapsed / 60;
+            let ss = elapsed % 60;
+            format!(" | ⏱{:02}:{:02}", mm, ss)
+        } else {
+            String::new()
+        };
+        (turn_str, timer_str)
+    } else {
+        (String::new(), String::new())
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(" ", Style::default().bg(Color::DarkGray)),
             Span::raw(&state.status),
             Span::raw(format!(
-                " | {:?} | stream:{}",
+                "{}{} | {:?} | stream:{}",
+                turn_info,
+                timer_info,
                 state.layout_mode,
                 if state.stream_enabled { "on" } else { "off" },
             )),

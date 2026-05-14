@@ -5,6 +5,7 @@ use ratatui::{
     text::Line,
 };
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct AppLayout {
@@ -48,6 +49,7 @@ pub(super) struct TuiAppState {
     pub(super) overlay: Overlay,
     pub(super) last_layout: Option<AppLayout>,
     pub(super) tick: u64,
+    pub(super) max_turns: Option<u64>,
 }
 
 impl TuiAppState {
@@ -86,8 +88,14 @@ impl TuiAppState {
                 stream_state: StreamState::Idle,
                 thinking_state: ThinkingState::Unavailable,
                 stream_metrics: StreamMetrics::default(),
+                session_started_at: None,
+                turn_started_at: None,
+                last_turn_elapsed: None,
             },
         );
+        let max_turns = std::env::var("KODA_MAX_TURNS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok());
         Self {
             root_label: cfg.workspace_dir.display().to_string(),
             profile_label: cfg
@@ -108,6 +116,7 @@ impl TuiAppState {
             overlay: Overlay::None,
             last_layout: None,
             tick: 0,
+            max_turns,
         }
     }
 
@@ -147,6 +156,9 @@ impl TuiAppState {
                 stream_state: StreamState::Idle,
                 thinking_state: ThinkingState::Unavailable,
                 stream_metrics: StreamMetrics::default(),
+                session_started_at: None,
+                turn_started_at: None,
+                last_turn_elapsed: None,
             },
         );
         self.active = id;
@@ -185,6 +197,10 @@ pub(super) struct TuiSessionState {
     pub(super) stream_state: StreamState,
     pub(super) thinking_state: ThinkingState,
     pub(super) stream_metrics: StreamMetrics,
+    // #7: session & turn timing
+    pub(super) session_started_at: Option<Instant>,
+    pub(super) turn_started_at: Option<Instant>,
+    pub(super) last_turn_elapsed: Option<Duration>,
 }
 
 impl TuiSessionState {
