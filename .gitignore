@@ -31,3 +31,6 @@
 # Local release artifacts
 /dist/
 /docs/book/book/
+
+.tmp*
+plan_github_issues/
