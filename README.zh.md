@@ -257,6 +257,10 @@ make smoke-tmwd-matrix
 
 部分浏览器 smoke 需要先启动 Chrome/Edge CDP 或安装并加载 `tmwd_cdp_bridge` 插件。
 
+## 贡献指南
+
+详见 [CONTRIBUTING.md](.github/CONTRIBUTING.md)，包含开发流程、推送前检查清单、CI 规范和 Git 卫生要求。
+
 ## 中文文档
 
 更详细的教程可以用 mdBook 渲染：

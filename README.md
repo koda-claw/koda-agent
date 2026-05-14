@@ -128,6 +128,10 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for development workflow, pre-push checklist, and CI guidelines.
+
 ## Configuration
 
 The primary configuration is `~/.koda-agent/config/llms.toml` plus `~/.koda-agent/.env`:
