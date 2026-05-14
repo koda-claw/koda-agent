@@ -2979,6 +2979,10 @@ PY"}),
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let signal = stop_path.clone();
         tokio::spawn(async move {
+            // Windows PowerShell has slow startup; give it time to emit "start"
+            #[cfg(windows)]
+            sleep(Duration::from_millis(2000)).await;
+            #[cfg(not(windows))]
             sleep(Duration::from_millis(300)).await;
             fs::write(signal, "1").unwrap();
         });

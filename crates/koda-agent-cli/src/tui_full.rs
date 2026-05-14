@@ -960,10 +960,18 @@ mod tests {
             KeyAction::None
         );
         assert_eq!(state.focus, FocusPane::Timeline);
+        // Ctrl+C twice to quit (2-second window)
         assert_eq!(
             reduce_key_event(
                 &mut state,
-                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ),
+            KeyAction::None
+        );
+        assert_eq!(
+            reduce_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
             ),
             KeyAction::Quit
         );
@@ -1439,7 +1447,14 @@ mod tests {
         assert_eq!(
             reduce_key_event(
                 &mut state,
-                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ),
+            KeyAction::None
+        );
+        assert_eq!(
+            reduce_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
             ),
             KeyAction::Quit
         );
@@ -1674,11 +1689,26 @@ mod tests {
             state: KeyEventState::NONE,
         };
         assert_eq!(reduce_key_event(&mut state, release_q), KeyAction::None);
-        // Press 'q' on empty composer still quits.
+        // Press 'q' in Composer focus appends to composer (not quit).
         assert_eq!(
             reduce_key_event(
                 &mut state,
                 KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
+            ),
+            KeyAction::None
+        );
+        // Ctrl+C twice to quit (2-second window)
+        assert_eq!(
+            reduce_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ),
+            KeyAction::None
+        );
+        assert_eq!(
+            reduce_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
             ),
             KeyAction::Quit
         );
@@ -1696,8 +1726,23 @@ mod tests {
             ),
             KeyAction::Abort
         );
+        // Esc does not quit; only Ctrl+C twice quits
         assert_eq!(
             reduce_key_event(&mut state, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            KeyAction::None
+        );
+        assert_eq!(
+            reduce_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ),
+            KeyAction::None
+        );
+        assert_eq!(
+            reduce_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ),
             KeyAction::Quit
         );
     }
@@ -2108,10 +2153,18 @@ mod tests {
 
         state.composer.clear();
         state.overlay = Overlay::Commands;
+        // Ctrl+C twice to quit (2-second window); Ctrl+q is not a quit key
         assert_eq!(
             reduce_key_event(
                 &mut state,
-                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ),
+            KeyAction::None
+        );
+        assert_eq!(
+            reduce_key_event(
+                &mut state,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
             ),
             KeyAction::Quit
         );
