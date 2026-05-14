@@ -37,6 +37,64 @@ use tokio::time::{sleep, timeout};
 
 const DEFAULT_RELEASE_REPO: &str = "koda-claw/koda-agent";
 const DEFAULT_LLMS_EXAMPLE: &str = include_str!("../../../config/llms.example.toml");
+const DEFAULT_MANIFEST_URL: &str =
+    "https://raw.githubusercontent.com/koda-claw/koda-agent/main/resources/resources-manifest.json";
+
+/// Remote manifest for resource updates
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ResourceManifest {
+    version: String,
+    published_at: String,
+    min_binary_version: Option<String>,
+    download_url: String,
+    sha256: String,
+    #[serde(default)]
+    signature: Option<String>,
+    #[serde(default)]
+    changelog: Option<String>,
+}
+
+/// Fetch manifest from remote URL
+async fn fetch_manifest(url: &str) -> Result<ResourceManifest> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    let resp = client.get(url).send().await?;
+    if !resp.status().is_success() {
+        bail!("Failed to fetch manifest: HTTP {}", resp.status());
+    }
+    let manifest: ResourceManifest = resp.json().await?;
+    Ok(manifest)
+}
+
+/// Verify manifest signature (simplified - placeholder for real implementation)
+#[allow(dead_code)]
+fn verify_signature(manifest: &ResourceManifest, _public_key: Option<&str>) -> bool {
+    // TODO: Implement proper signature verification
+    // For now, accept manifests without signatures
+    manifest.signature.is_none()
+}
+
+/// Check if an update is available
+#[allow(dead_code)]
+fn check_for_update(current_version: &str, manifest: &ResourceManifest) -> Option<String> {
+    if manifest.version.as_str() > current_version {
+        Some(format!(
+            "Update available: {} -> {}",
+            current_version, manifest.version
+        ))
+    } else {
+        None
+    }
+}
+
+/// Load local version.json if it exists
+fn load_local_version(home_dir: &Path) -> Option<serde_json::Value> {
+    let version_path = home_dir.join("resources/version.json");
+    fs::read_to_string(version_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -271,6 +329,29 @@ enum ResourceCommand {
     #[command(about = "Check resource markers in source and Koda home")]
     Doctor {
         #[arg(long)]
+        json: bool,
+    },
+    #[command(about = "Update resources from remote manifest")]
+    Update {
+        #[arg(long, help = "Custom manifest URL; defaults to GitHub raw main branch")]
+        manifest_url: Option<String>,
+        #[arg(long, help = "Force update even if already up to date")]
+        force: bool,
+        #[arg(long, help = "Show planned update actions without downloading")]
+        dry_run: bool,
+        #[arg(long, help = "Skip backup of current resources before update")]
+        no_backup: bool,
+    },
+    #[command(about = "Check if resource updates are available")]
+    CheckUpdate {
+        #[arg(long, help = "Custom manifest URL")]
+        manifest_url: Option<String>,
+        #[arg(long, help = "Emit result as JSON")]
+        json: bool,
+    },
+    #[command(about = "Show installed resource version and file hashes")]
+    List {
+        #[arg(long, help = "Emit result as JSON")]
         json: bool,
     },
 }
@@ -1160,12 +1241,84 @@ fn run_python_env(command: &PythonEnvCommand) -> Result<()> {
     }
 }
 
+/// Phase 4: Silent background version check. Fails silently.
+fn maybe_check_update_hint(home_dir: &Path) -> Result<()> {
+    let version_path = home_dir.join("resources/version.json");
+    let local = load_local_version(home_dir);
+    let current_version = local
+        .as_ref()
+        .and_then(|v| v.get("installed_version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("0.0.0")
+        .to_string();
+
+    // Check frequency: skip if checked within last 24h
+    let last_check = local
+        .as_ref()
+        .and_then(|v| v.get("last_update_check"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+    if let Some(last) = last_check {
+        let elapsed = chrono::Utc::now() - last;
+        if elapsed.num_hours() < 24 {
+            return Ok(());
+        }
+    }
+
+    // Spawn a dedicated thread to avoid nested tokio runtime panic
+    let manifest = std::thread::spawn(|| {
+        let rt = tokio::runtime::Runtime::new().ok()?;
+        rt.block_on(async {
+            timeout(Duration::from_secs(5), fetch_manifest(DEFAULT_MANIFEST_URL))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+        })
+    })
+    .join()
+    .ok()
+    .flatten();
+
+    let manifest = match manifest {
+        Some(m) => m,
+        None => {
+            // Still update last_check to avoid hammering on every CLI invocation
+            let mut version_info = local.unwrap_or_default();
+            version_info["last_update_check"] =
+                serde_json::Value::String(chrono::Utc::now().to_rfc3339());
+            let _ = fs::write(&version_path, serde_json::to_string_pretty(&version_info)?);
+            return Ok(());
+        }
+    };
+
+    // Update last_check timestamp
+    let mut version_info = local.unwrap_or_default();
+    version_info["last_update_check"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
+    let _ = fs::write(&version_path, serde_json::to_string_pretty(&version_info)?);
+
+    if manifest.version > current_version {
+        eprintln!(
+            "\n💡 Resource update available: {} → {} (run `koda-agent resources update` to apply)",
+            current_version, manifest.version
+        );
+    }
+    Ok(())
+}
+
 fn run_resources(
     root: &Path,
     path_options: AgentPathOptions,
     command: &ResourceCommand,
 ) -> Result<()> {
     let paths = resolve_agent_paths_with_options(root, path_options);
+    // Phase 4: silent background version check for non-update commands
+    if !matches!(
+        command,
+        ResourceCommand::Update { .. } | ResourceCommand::CheckUpdate { .. }
+    ) {
+        let _ = maybe_check_update_hint(&paths.home_dir);
+    }
     match command {
         ResourceCommand::Install {
             source,
@@ -1200,6 +1353,208 @@ fn run_resources(
                         "missing"
                     }
                 );
+            }
+        }
+        ResourceCommand::Update {
+            manifest_url,
+            force,
+            dry_run,
+            no_backup,
+        } => {
+            let url = manifest_url.as_deref().unwrap_or(DEFAULT_MANIFEST_URL);
+            println!("Checking for resource updates...");
+
+            // Fetch manifest (reuse current tokio runtime via block_in_place)
+            let manifest = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    match timeout(Duration::from_secs(15), fetch_manifest(url)).await {
+                        Ok(Ok(m)) => Ok(m),
+                        Ok(Err(e)) => bail!("Failed to fetch manifest: {}", e),
+                        Err(_) => bail!("Timeout fetching manifest"),
+                    }
+                })
+            })?;
+
+            // Load local version
+            let local = load_local_version(&paths.home_dir);
+            let current_version = local
+                .as_ref()
+                .and_then(|v| v.get("installed_version"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("0.0.0");
+
+            println!("  Remote version: {}", manifest.version);
+            println!("  Local version:  {}", current_version);
+
+            if !*force && manifest.version.as_str() <= current_version {
+                println!("Resources are already up to date.");
+                return Ok(());
+            }
+
+            if *dry_run {
+                println!(
+                    "\n[dry-run] Would update resources from {} to {}",
+                    current_version, manifest.version
+                );
+                println!("  Download URL: {}", manifest.download_url);
+                return Ok(());
+            }
+
+            // Download and extract (reuse current tokio runtime)
+            println!("Downloading resources...");
+            let temp_dir = tempfile::tempdir()?;
+            let archive_path = temp_dir.path().join("resources.tar.gz");
+
+            // Download using block_in_place to avoid nested runtime panic
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let client = reqwest::Client::builder()
+                        .timeout(Duration::from_secs(120))
+                        .build()?;
+                    let resp = client.get(&manifest.download_url).send().await?;
+                    if !resp.status().is_success() {
+                        bail!("Download failed: HTTP {}", resp.status());
+                    }
+                    let bytes = resp.bytes().await?;
+                    fs::write(&archive_path, bytes)?;
+                    Ok::<(), anyhow::Error>(())
+                })
+            })?;
+
+            // Verify hash
+            {
+                use sha2::{Digest, Sha256};
+                let bytes = fs::read(&archive_path)?;
+                let downloaded_hash = format!("{:x}", Sha256::digest(&bytes));
+                if downloaded_hash != manifest.sha256 {
+                    bail!(
+                        "SHA256 mismatch: expected {}, got {}",
+                        manifest.sha256,
+                        downloaded_hash
+                    );
+                }
+            }
+
+            // Backup current resources if requested
+            if !*no_backup {
+                let backup_dir = paths.home_dir.join("resources_backup");
+                if backup_dir.exists() {
+                    fs::remove_dir_all(&backup_dir)?;
+                }
+                let current_res = paths.home_dir.join("resources");
+                if current_res.exists() {
+                    fs::rename(&current_res, &backup_dir)?;
+                    println!("  Backed up current resources to {}", backup_dir.display());
+                }
+            }
+
+            // Extract archive
+            println!("Extracting resources...");
+            let dest = paths.home_dir.join("resources");
+            fs::create_dir_all(&dest)?;
+            extract_release_archive(&archive_path, &dest, ArchiveKind::TarGz)?;
+
+            // Update version.json
+            let new_hashes = compute_resource_file_hashes(&dest);
+            let version_info = serde_json::json!({
+                "installed_version": manifest.version,
+                "installed_at": chrono::Utc::now().to_rfc3339(),
+                "binary_version": env!("CARGO_PKG_VERSION"),
+                "file_hashes": new_hashes,
+            });
+            let version_path = paths.home_dir.join("resources/version.json");
+            fs::write(&version_path, serde_json::to_string_pretty(&version_info)?)?;
+
+            println!(
+                "Resources updated to version {} successfully!",
+                manifest.version
+            );
+        }
+        ResourceCommand::CheckUpdate { manifest_url, json } => {
+            let url = manifest_url.as_deref().unwrap_or(DEFAULT_MANIFEST_URL);
+
+            // Reuse current tokio runtime instead of creating a new one
+            let manifest = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    match timeout(Duration::from_secs(15), fetch_manifest(url)).await {
+                        Ok(Ok(m)) => Ok(m),
+                        Ok(Err(e)) => bail!("Failed to fetch manifest: {}", e),
+                        Err(_) => bail!("Timeout fetching manifest"),
+                    }
+                })
+            })?;
+
+            let local = load_local_version(&paths.home_dir);
+            let current_version = local
+                .as_ref()
+                .and_then(|v| v.get("installed_version"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("0.0.0");
+
+            let update_available = manifest.version.as_str() > current_version;
+
+            if *json {
+                let result = serde_json::json!({
+                    "update_available": update_available,
+                    "current_version": current_version,
+                    "latest_version": manifest.version,
+                    "download_url": manifest.download_url,
+                    "published_at": manifest.published_at,
+                });
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                if update_available {
+                    println!(
+                        "Update available: {} -> {}",
+                        current_version, manifest.version
+                    );
+                    println!("  Published: {}", manifest.published_at);
+                    println!("  Download: {}", manifest.download_url);
+                    if let Some(changelog) = &manifest.changelog {
+                        println!("  Changelog: {}", changelog);
+                    }
+                } else {
+                    println!("Resources are up to date (version {})", current_version);
+                }
+            }
+        }
+        ResourceCommand::List { json } => {
+            let version_path = paths.home_dir.join("resources/version.json");
+            if !version_path.exists() {
+                if *json {
+                    println!("{{}}");
+                } else {
+                    println!("No resource version information found.");
+                    println!("  Run `koda-agent resources install` to install resources.");
+                }
+                return Ok(());
+            }
+            let content = fs::read_to_string(&version_path)?;
+            let version_info: serde_json::Value = serde_json::from_str(&content)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&version_info)?);
+            } else {
+                println!("Installed Resources");
+                if let Some(v) = version_info
+                    .get("installed_version")
+                    .and_then(|v| v.as_str())
+                {
+                    println!("  Version:    {}", v);
+                }
+                if let Some(t) = version_info.get("installed_at").and_then(|v| v.as_str()) {
+                    println!("  Installed:  {}", t);
+                }
+                if let Some(b) = version_info.get("binary_version").and_then(|v| v.as_str()) {
+                    println!("  Binary:     {}", b);
+                }
+                if let Some(hashes) = version_info.get("file_hashes").and_then(|v| v.as_object()) {
+                    let count = hashes.len();
+                    let matches = hashes
+                        .values()
+                        .filter(|v| v.get("status").and_then(|s| s.as_str()) == Some("ok"))
+                        .count();
+                    println!("  Files:      {}/{} verified", matches, count);
+                }
             }
         }
     }
@@ -3656,6 +4011,61 @@ fn env_value_available_in_files(env_paths: &[PathBuf], key: &str) -> Option<Stri
     })
 }
 
+/// Compute sha256 hashes for all files under the resources directory
+fn compute_resource_file_hashes(resources_dir: &Path) -> serde_json::Value {
+    use sha2::{Digest, Sha256};
+    let mut hashes = serde_json::Map::new();
+    if let Ok(entries) = fs::read_dir(resources_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(resources_dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .to_string();
+            if path.is_dir() {
+                // Recurse into subdirectories
+                if let Ok(sub_entries) = fs::read_dir(&path) {
+                    for sub in sub_entries.flatten() {
+                        collect_file_hash(sub.path(), resources_dir, &mut hashes);
+                    }
+                }
+            } else if path.is_file()
+                && let Ok(bytes) = fs::read(&path)
+            {
+                let hash = format!("{:x}", Sha256::digest(&bytes));
+                hashes.insert(relative, serde_json::Value::String(hash));
+            }
+        }
+    }
+    serde_json::Value::Object(hashes)
+}
+
+fn collect_file_hash(
+    path: PathBuf,
+    base: &Path,
+    hashes: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    use sha2::{Digest, Sha256};
+    if path.is_dir() {
+        if let Ok(entries) = fs::read_dir(&path) {
+            for entry in entries.flatten() {
+                collect_file_hash(entry.path(), base, hashes);
+            }
+        }
+    } else if path.is_file() {
+        let relative = path
+            .strip_prefix(base)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
+        if let Ok(bytes) = fs::read(&path) {
+            let hash = format!("{:x}", Sha256::digest(&bytes));
+            hashes.insert(relative, serde_json::Value::String(hash));
+        }
+    }
+}
+
 fn install_resources(
     source_root: &Path,
     home_dir: &Path,
@@ -3729,6 +4139,26 @@ fn install_resources(
         &mut skipped,
     )?;
     prune_skipped_resource_files(&dest_root, &dest_root, dry_run, &mut removed)?;
+
+    // Write version.json for resource version tracking
+    let version_json_path = dest_root.join("version.json");
+    if !dry_run {
+        let file_hashes = compute_resource_file_hashes(&dest_root);
+        let version_data = serde_json::json!({
+            "installed_version": "1.0.0",
+            "installed_at": chrono::Utc::now().to_rfc3339(),
+            "binary_version": env!("CARGO_PKG_VERSION"),
+            "file_hashes": file_hashes,
+        });
+        fs::write(
+            &version_json_path,
+            serde_json::to_string_pretty(&version_data)?,
+        )?;
+        copied.push("resources/version.json".into());
+    } else {
+        skipped.push("resources/version.json (dry_run)".into());
+    }
+
     Ok(serde_json::json!({
         "source": source_root.display().to_string(),
         "home": home_dir.display().to_string(),

@@ -2,8 +2,8 @@
 
 ## 文件IO协议
 
-- 目录：`temp/{task_name}/`（cwd在temp/时即`./{task_name}/`）
-- 启动：`python agentmain.py --task {name} [--input "短文本"] [--llm_no N]`（cwd=代码根）
+- 目录：`~/.koda-agent/temp/{task_name}/`（即 `$HOME/.koda-agent/temp/{task_name}/`）
+- 启动：`koda-agent --task {name} [--input "短文本"] [--llm_no N]`（任意cwd）
 - `--input`自动建目录+清旧output+写input.txt；长文本先手动写input.txt再启动(不带--input)
 - 自动后台启动，print PID then exit
 - subagent的cwd还是temp，不是task目录
