@@ -34,7 +34,7 @@ fn compute_layout(area: Rect) -> AppLayout {
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
-                    Constraint::Length(28),
+                    Constraint::Length(34),
                     Constraint::Min(40),
                     Constraint::Length(34),
                 ])
@@ -44,7 +44,7 @@ fn compute_layout(area: Rect) -> AppLayout {
         LayoutMode::Medium => {
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(26), Constraint::Min(32)])
+                .constraints([Constraint::Length(30), Constraint::Min(32)])
                 .split(vertical[1]);
             (Some(chunks[0]), chunks[1], None)
         }
@@ -129,33 +129,48 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &TuiAppState) {
 }
 
 fn render_sessions(frame: &mut Frame<'_>, area: Rect, state: &TuiAppState) {
-    let name_width = usize::from(area.width.saturating_sub(17)).clamp(8, 28);
+    // prefix: marker(1) + index(3) + space(1) = 5; suffix: space(1) + emoji(1) + activity(4) = 6
+    let name_width = usize::from(area.width.saturating_sub(12)).clamp(10, 40);
     let items = state
         .sessions
         .values()
-        .map(|session| {
-            let marker = if session.id == state.active { ">" } else { " " };
-            let unread = if session.unread_events > 0 {
+        .enumerate()
+        .map(|(idx, session)| {
+            let marker = if session.id == state.active {
+                "▸"
+            } else {
+                " "
+            };
+            let status_icon = match session.status {
+                SessionStatus::Running => "⚡",
+                SessionStatus::WaitingUser => "❓",
+                SessionStatus::Idle => "✓",
+                SessionStatus::Error => "✗",
+            };
+            let activity = if session.unread_events > 0 {
                 format!(" +{}", session.unread_events)
             } else {
                 String::new()
             };
-            let activity = if matches!(session.status, SessionStatus::Running) {
-                format!(" t{}", session.active_turn.unwrap_or_default())
-            } else if let Some(ask) = session.pending_ask.as_ref() {
-                format!(" !{}", ask.candidates.len())
-            } else {
-                unread
-            };
             let line = Line::from(vec![
                 Span::styled(marker, Style::default().fg(Color::LightGreen)),
-                Span::raw(format!(" #{} ", session.id)),
                 Span::styled(
-                    trim_chars(&session.name, name_width),
-                    Style::default().fg(Color::White),
+                    format!("{:>3}", idx + 1),
+                    Style::default().fg(Color::DarkGray),
                 ),
                 Span::raw(" "),
-                Span::styled(session.status.label(), session.status.style()),
+                Span::styled(
+                    trim_chars(&session.name, name_width),
+                    if session.id == state.active {
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    },
+                ),
+                Span::raw(" "),
+                Span::raw(status_icon),
                 Span::styled(activity, Style::default().fg(Color::LightYellow)),
             ]);
             ListItem::new(line)
@@ -259,6 +274,7 @@ fn timeline_signature(session: &TuiSessionState) -> TimelineSignature {
             TimelineItem::User(text)
             | TimelineItem::Assistant(text)
             | TimelineItem::Thinking(text)
+            | TimelineItem::Summary(text)
             | TimelineItem::System(text)
             | TimelineItem::Error(text) => text.len(),
             TimelineItem::ToolCall { name, args } => name.len() + args.len(),
@@ -302,6 +318,18 @@ fn timeline_lines(session: &TuiSessionState) -> Vec<Line<'static>> {
                 lines.push(Line::from(vec![
                     Span::styled("◇ ", Style::default().fg(Color::Cyan)),
                     Span::styled("思考 Thinking", Style::default().fg(Color::Cyan)),
+                ]));
+                lines.extend(render_markdown_lines(text, Color::DarkGray));
+            }
+            TimelineItem::Summary(text) => {
+                lines.push(Line::from(vec![
+                    Span::styled("📋 ", Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        "摘要 Summary",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
                 ]));
                 lines.extend(render_markdown_lines(text, Color::DarkGray));
             }

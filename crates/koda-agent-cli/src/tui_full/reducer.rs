@@ -191,7 +191,7 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
                 );
             }
         }
-        (_, KeyCode::Char('j')) | (_, KeyCode::Down) if state.composer.is_empty() => {
+        (_, KeyCode::Down) => {
             if let Some(next) = state
                 .sessions
                 .range((state.active + 1)..)
@@ -202,7 +202,7 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
                 activate_session(state, next);
             }
         }
-        (_, KeyCode::Char('k')) | (_, KeyCode::Up) if state.composer.is_empty() => {
+        (_, KeyCode::Up) => {
             if let Some(prev) = state
                 .sessions
                 .range(..state.active)
