@@ -44,10 +44,16 @@ pub(super) fn load_recent_history_sessions(
     };
     paths.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
 
+    // 按session ID去重，保留最新的（文件名排序后第一个）
+    let mut seen = std::collections::HashSet::new();
     paths
         .into_iter()
         .filter_map(|path| load_history_session_file(&path).ok())
         .filter(|raw| !raw.history.is_empty() || !raw.messages.is_empty())
+        .filter(|raw| {
+            let key = raw.session.clone().unwrap_or_default();
+            seen.insert(key) // insert返回true表示首次出现
+        })
         .take(MAX_HISTORY_SESSIONS)
         .enumerate()
         .map(|(idx, raw)| history_session_to_tui(raw, start_id + idx))
@@ -68,28 +74,36 @@ fn load_history_session_file(path: &Path) -> serde_json::Result<RawSessionFile> 
 }
 
 fn history_session_to_tui(raw: RawSessionFile, id: usize) -> LoadedHistorySession {
-    let title = history_prompt_title(&raw.history).unwrap_or_else(|| {
-        raw.session
-            .as_deref()
-            .map(history_session_title)
-            .unwrap_or_else(|| format!("history-{id}"))
-    });
+    let title =
+        history_prompt_title(&raw.history, raw.created_at.as_deref()).unwrap_or_else(|| {
+            raw.session
+                .as_deref()
+                .map(history_session_title)
+                .unwrap_or_else(|| format!("history-{id}"))
+        });
     let history_info = raw.history.clone();
     let mut timeline = Vec::new();
     let created = raw.created_at.as_deref().unwrap_or("unknown time");
     timeline.push(TimelineItem::System(format!(
         "Loaded historical session from L4 memory ({created}). Submit a new prompt to continue from its saved messages."
     )));
-    timeline.extend(
-        raw.history
-            .iter()
-            .rev()
-            .take(MAX_HISTORY_LINES)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .map(|line| history_line_to_timeline(line)),
-    );
+    // 优先使用messages结构化数据，fallback到history文本行
+    if !raw.messages.is_empty() && raw.messages.iter().any(|m| m.role != "system") {
+        let items = messages_to_timeline(&raw.messages);
+        timeline.extend(items.into_iter().filter(is_visible_timeline));
+    } else {
+        timeline.extend(history_lines_to_timeline(
+            &raw.history
+                .iter()
+                .rev()
+                .take(MAX_HISTORY_LINES)
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>(),
+        ));
+    }
 
     LoadedHistorySession {
         session: TuiSessionState {
@@ -129,13 +143,22 @@ fn history_session_title(session: &str) -> String {
     trim_chars(&format!("hist-{short}"), 32)
 }
 
-fn history_prompt_title(history: &[String]) -> Option<String> {
+fn history_prompt_title(history: &[String], created_at: Option<&str>) -> Option<String> {
+    let time_prefix = created_at
+        .and_then(|s| s.get(5..16)) // "2026-05-11T12:04" → "05-11T12:04"
+        .map(|s| s.replace('T', " "))
+        .unwrap_or_default();
     history.iter().find_map(|line| {
         let prompt = line.trim().strip_prefix("[USER]:")?.trim();
         if prompt.is_empty() {
             None
         } else {
-            Some(trim_chars(&format!("hist {}", compact_title(prompt)), 32))
+            let title = compact_title(prompt);
+            if time_prefix.is_empty() {
+                Some(trim_chars(&format!("hist {title}"), 32))
+            } else {
+                Some(trim_chars(&format!("{time_prefix} {title}"), 32))
+            }
         }
     })
 }
@@ -147,8 +170,40 @@ fn compact_title(text: &str) -> String {
         .to_string()
 }
 
+/// 识别系统内部注入的消息，不展示在用户时间线中
+fn is_system_infra_line(line: &str) -> bool {
+    line.starts_with("[SYSTEM")
+        || line.starts_with("[Resource Memory]")
+        || line.starts_with("<earlier_context>")
+        || line.starts_with("<history>")
+        || line.starts_with("[MASTER]")
+        || line.starts_with("[WORKING MEMORY]")
+        || line.starts_with("[Peer]")
+}
+
+/// 跳过系统注入的用户消息（[SYSTEM, [DANGER, <earlier_context>, <history>, cwd=等）
+fn is_visible_timeline(item: &TimelineItem) -> bool {
+    match item {
+        TimelineItem::User(text) => !is_system_injected(text),
+        _ => true,
+    }
+}
+
+/// 从history行列表生成timeline，过滤系统infra消息
+fn history_lines_to_timeline(lines: &[String]) -> Vec<TimelineItem> {
+    lines
+        .iter()
+        .map(|l| history_line_to_timeline(l))
+        .filter(is_visible_timeline)
+        .collect()
+}
+
 fn history_line_to_timeline(line: &str) -> TimelineItem {
     let trimmed = line.trim();
+    // 过滤系统内部消息，不展示在用户时间线中
+    if is_system_infra_line(trimmed) {
+        return TimelineItem::System(String::new()); // 空字符串，渲染时可跳过
+    }
     if let Some(rest) = trimmed.strip_prefix("[USER]:") {
         TimelineItem::User(rest.trim().to_string())
     } else if let Some(rest) = trimmed.strip_prefix("[Agent]") {
@@ -273,6 +328,209 @@ fn is_tool_name_like(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.')
 }
 
+/// 提取<summary>...</summary>中的内容
+fn extract_summary(text: &str) -> Option<String> {
+    let start_tag = "<summary>";
+    let end_tag = "</summary>";
+    let start = text.find(start_tag)?;
+    let content_start = start + start_tag.len();
+    let end = text[content_start..].find(end_tag)? + content_start;
+    let content = text[content_start..end].trim();
+    if content.is_empty() {
+        None
+    } else {
+        Some(content.to_string())
+    }
+}
+
+/// 剥离<summary>...</summary>后的正文
+fn strip_summary(text: &str) -> String {
+    let start_tag = "<summary>";
+    let end_tag = "</summary>";
+    let start = match text.find(start_tag) {
+        Some(s) => s,
+        None => return text.to_string(),
+    };
+    let content_start = start + start_tag.len();
+    let end = match text[content_start..].find(end_tag) {
+        Some(e) => e + content_start + end_tag.len(),
+        None => return text.to_string(),
+    };
+    let mut result = String::new();
+    if start > 0 {
+        result.push_str(&text[..start]);
+    }
+    let rest = text[end..].trim_start();
+    if !rest.is_empty() {
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(rest);
+    }
+    result
+}
+
+/// 判断user消息内容是否为系统注入（非真实用户输入）
+/// trim后匹配已知系统注入前缀
+fn is_system_injected(text: &str) -> bool {
+    let t = text.trim();
+    t.starts_with("[SYSTEM")
+        || t.starts_with("[DANGER")
+        || t.starts_with("<earlier_context>")
+        || t.starts_with("<history>")
+        || t.starts_with("<system-recall>")
+        || t.starts_with("### [WORKING MEMORY")
+        || t.starts_with("cwd = ")
+}
+
+// ============================================================================
+// messages_to_timeline: 从结构化ChatMessage渲染TimelineItem
+// ============================================================================
+
+fn messages_to_timeline(messages: &[ChatMessage]) -> Vec<TimelineItem> {
+    let mut result = Vec::new();
+    for msg in messages {
+        match msg.role.as_str() {
+            "system" => {} // 跳过system消息
+            "user" => {
+                // 过滤含tool_results的消息（工具结果回显，非用户输入）
+                if let Some(obj) = msg.content.as_object() {
+                    if obj.contains_key("tool_results") {
+                        continue;
+                    }
+                }
+                if let Some(text) = extract_user_text(&msg.content) {
+                    if is_system_injected(&text) {
+                        continue;
+                    }
+                    result.push(TimelineItem::User(text));
+                }
+            }
+            "assistant" => {
+                // assistant的content可能是纯文本或JSON对象
+                if let Some(obj) = msg.content.as_object() {
+                    // 提取thinking字段
+                    if let Some(thinking) = obj.get("thinking").and_then(|v| v.as_str()) {
+                        let trimmed = thinking.trim();
+                        if !trimmed.is_empty() {
+                            result.push(TimelineItem::Thinking(trimmed.to_string()));
+                        }
+                    }
+                    // 提取text字段
+                    if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            // 提取<summary>...</summary>
+                            if let Some(summary) = extract_summary(text) {
+                                result.push(TimelineItem::Summary(summary));
+                            }
+                            // 剥离<summary>后的正文
+                            let body = strip_summary(text);
+                            if !body.is_empty() {
+                                result.push(TimelineItem::Assistant(body));
+                            }
+                        }
+                    }
+                    // 提取tool_calls
+                    if let Some(calls) = obj.get("tool_calls").and_then(|v| v.as_array()) {
+                        for call in calls {
+                            if let Some(item) = parse_tool_call_value(call) {
+                                result.push(item);
+                            }
+                        }
+                    }
+                } else if let Some(text) = msg.content.as_str() {
+                    // 纯文本assistant消息
+                    let text = text.trim();
+                    if !text.is_empty() {
+                        if let Some(summary) = extract_summary(text) {
+                            result.push(TimelineItem::Summary(summary));
+                        }
+                        let body = strip_summary(text);
+                        if !body.is_empty() {
+                            result.push(TimelineItem::Assistant(body));
+                        }
+                    }
+                }
+            }
+            "tool" => {
+                // tool消息通常是工具执行结果
+                if let Some(obj) = msg.content.as_object() {
+                    let name = obj
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let content = obj
+                        .get("content")
+                        .map(|v| {
+                            v.as_str()
+                                .map(ToOwned::to_owned)
+                                .unwrap_or_else(|| v.to_string())
+                        })
+                        .unwrap_or_default();
+                    result.push(TimelineItem::ToolResult {
+                        name: name.to_string(),
+                        args: String::new(),
+                        data: content,
+                    });
+                }
+            }
+            _ => {} // 忽略其他role
+        }
+    }
+    result
+}
+
+/// 从user消息的content中提取文本
+/// content可能是：
+///   - 纯文本字符串
+///   - JSON对象 {content: "...", ...}（含系统提示时）
+fn extract_user_text(content: &serde_json::Value) -> Option<String> {
+    if let Some(text) = content.as_str() {
+        // 纯文本，但可能包含系统提示前缀
+        // 简单处理：取最后一段用户消息
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        // 如果包含"[USER]:"或类似的分隔符，取最后一部分
+        // 否则直接返回
+        Some(trimmed.to_string())
+    } else if let Some(obj) = content.as_object() {
+        // JSON对象，尝试提取content字段
+        obj.get("content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    }
+}
+
+/// 解析tool_call的JSON值为TimelineItem
+fn parse_tool_call_value(value: &serde_json::Value) -> Option<TimelineItem> {
+    let name = value
+        .get("name")
+        .and_then(serde_json::Value::as_str)?
+        .trim();
+    if !is_tool_name_like(name) {
+        return None;
+    }
+    let args = value
+        .get("args")
+        .or_else(|| value.get("arguments"))
+        .map(|v| {
+            v.as_str()
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| v.to_string())
+        })
+        .unwrap_or_default();
+    Some(TimelineItem::ToolCall {
+        name: name.to_string(),
+        args,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,8 +587,7 @@ mod tests {
             serde_json::to_vec_pretty(&json!({
                 "session": "session_20260510_120000_1",
                 "created_at": "2026-05-10T12:00:00+08:00",
-                "history": ["[USER]: 你好", "[Agent] 调用工具file_read, args: {}", "[Agent] 完成"],
-                "messages": [{"role":"user", "content":"你好"}]
+                "history": ["[USER]: 你好", "[Agent] 调用工具file_read, args: {}", "[Agent] 完成"]
             }))
             .unwrap(),
         )
@@ -339,9 +596,9 @@ mod tests {
         let loaded = load_recent_history_sessions(&cfg, 2);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].session.id, 2);
-        assert_eq!(loaded[0].session.name, "hist 你好");
+        assert_eq!(loaded[0].session.name, "05-10 12:00 你好");
         assert_eq!(loaded[0].history_info.len(), 3);
-        assert_eq!(loaded[0].messages.len(), 1);
+        assert_eq!(loaded[0].messages.len(), 0);
 
         // timeline[0] = System("Loaded historical session...")
         assert!(matches!(

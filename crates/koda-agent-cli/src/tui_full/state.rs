@@ -343,6 +343,7 @@ pub(super) enum TimelineItem {
     User(String),
     Assistant(String),
     Thinking(String),
+    Summary(String),
     ToolCall {
         name: String,
         args: String,
