@@ -83,6 +83,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -90,9 +91,59 @@ jobs:
         run: |
           find artifacts -name '*.sha256' -print0 | xargs -0 cat > SHA256SUMS
           find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} . \;
+      - name: Build resources archive
+        run: |
+          TMPDIR=$(mktemp -d)
+          mkdir -p "${TMPDIR}/resources"
+          cp -R assets memory config "${TMPDIR}/resources/"
+          cp requirements-python-*.txt "${TMPDIR}/resources/" 2>/dev/null || true
+          rm -f "${TMPDIR}/resources/assets/tmwd_cdp_bridge/config.js" 2>/dev/null || true
+          rm -f "${TMPDIR}/resources/config/llms.toml" 2>/dev/null || true
+          rm -f "${TMPDIR}/resources/memory/global_mem.txt" \
+                "${TMPDIR}/resources/memory/global_mem_insight.txt" \
+                "${TMPDIR}/resources/memory/file_access_stats.json" \
+                "${TMPDIR}/resources/memory/long_term_updates.jsonl" \
+                "${TMPDIR}/resources/memory/pending_long_term_updates.md" 2>/dev/null || true
+          find "${TMPDIR}/resources/memory/L4_raw_sessions" -type f ! -name 'compress_session.py' -delete 2>/dev/null || true
+          tar -C "${TMPDIR}" -czf resources.tar.gz resources
+          sha256sum resources.tar.gz >> SHA256SUMS
+      - name: Generate resources manifest
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          TAG="${GITHUB_REF_NAME}"
+          RES_SHA256=$(sha256sum resources.tar.gz | awk '{print $1}')
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/resources.tar.gz"
+          BINARY_VERSION=$(cargo metadata --format-version=1 --no-deps 2>/dev/null \
+            | python3 -c "import sys,json; pkgs=[p for p in json.load(sys.stdin)['packages'] if p['name']=='koda-agent-cli']; print(pkgs[0]['version'] if pkgs else 'unknown')")
+          PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          mkdir -p resources
+          python3 -c "
+          import json
+          manifest = {
+              'version': '${VERSION}',
+              'published_at': '${PUBLISHED_AT}',
+              'min_binary_version': '${BINARY_VERSION}',
+              'download_url': '${DOWNLOAD_URL}',
+              'sha256': '${RES_SHA256}',
+              'changelog': ''
+          }
+          with open('resources/resources-manifest.json', 'w') as f:
+              json.dump(manifest, f, indent=2)
+              f.write('\n')
+          "
+          cat resources/resources-manifest.json
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             koda-agent-*.tar.gz
             koda-agent-*.zip
+            resources.tar.gz
             SHA256SUMS
+      - name: Commit manifest to main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add resources/resources-manifest.json
+          git diff --cached --quiet && exit 0
+          git commit -m "Update resources-manifest.json for ${GITHUB_REF_NAME}"
+          git push origin main

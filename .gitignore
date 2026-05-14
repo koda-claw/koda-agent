@@ -32,6 +32,10 @@
 /dist/
 /docs/book/book/
 
+# Generated resource artifacts (created by scripts/generate-manifest.sh or CI)
+/resources.tar.gz
+/resources/resources-manifest.json
+
 .tmp*
 plan_github_issues/
 

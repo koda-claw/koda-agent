@@ -5,7 +5,7 @@ BIN ?= koda-agent
 PORT ?= 8787
 PROMPT ?= 请只回复 OK，不要调用工具。
 
-.PHONY: help fmt fmt-check clippy test check build run docs docs-serve tmwebdriver smoke-browser smoke-tmwd-extension smoke-tmwd-matrix smoke-tmwd-static-parity smoke-rich-monitor smoke-tui smoke-http smoke-acp smoke-acp-client smoke-webhook audit-secrets audit-history release-dry-run install-local uninstall-local bootstrap-python doctor clean git-status
+.PHONY: help fmt fmt-check clippy test check build run docs docs-serve tmwebdriver smoke-browser smoke-tmwd-extension smoke-tmwd-matrix smoke-tmwd-static-parity smoke-rich-monitor smoke-tui smoke-http smoke-acp smoke-acp-client smoke-webhook audit-secrets audit-history release-dry-run install-local uninstall-local bootstrap-python doctor clean git-status generate-manifest
 
 help:
 	@printf '%s\n' \
@@ -33,6 +33,7 @@ help:
 	  '  make audit-secrets Scan current tracked files for secrets/runtime data' \
 	  '  make audit-history Scan Git history for secrets/runtime data' \
 	  '  make release-dry-run Build release binary and checksum locally' \
+	  '  make generate-manifest Generate resources/resources-manifest.json for current version' \
 	  '  make install-local Install from this checkout into ~/.local' \
 	  '  make uninstall-local Remove ~/.local/bin/koda-agent' \
 	  '  make bootstrap-python Create/repair managed Python helper venv' \
@@ -92,6 +93,11 @@ release-dry-run:
 
 install-local:
 	scripts/install.sh --from-source
+
+generate-manifest:
+	@VERSION=$$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/'); \
+	echo "Generating manifest for v$$VERSION ..."; \
+	./scripts/generate-manifest.sh "$$VERSION" ""
 
 uninstall-local:
 	scripts/uninstall.sh
