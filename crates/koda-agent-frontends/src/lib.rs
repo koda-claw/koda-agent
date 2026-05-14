@@ -2388,7 +2388,17 @@ fn looks_like_local_file(path: &str) -> bool {
     ]
     .iter()
     .any(|ext| path.to_ascii_lowercase().ends_with(ext));
-    has_file_ext && (path.starts_with('/') || path.starts_with("./") || path.starts_with("../"))
+    // Unix absolute/relative paths
+    let unix_prefix = path.starts_with('/') || path.starts_with("./") || path.starts_with("../");
+    // Windows absolute paths: drive letter like C:\ or C:/
+    let windows_prefix = {
+        let bytes = path.as_bytes();
+        bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/')
+    };
+    has_file_ext && (unix_prefix || windows_prefix)
 }
 
 // ============================================================
