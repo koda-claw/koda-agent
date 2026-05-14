@@ -34,3 +34,6 @@
 
 .tmp*
 plan_github_issues/
+
+__pycache__/
+plan_session_render_optimization/
