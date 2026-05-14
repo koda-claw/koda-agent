@@ -7799,12 +7799,9 @@ id = "mimo-v2.5-pro"
 
         let result = install_resources(&src, &home, false, false);
         // Should either succeed with missing entries or return error, but NOT panic
-        match result {
-            Ok(report) => {
-                let missing = report.get("missing").and_then(|v| v.as_array()).unwrap();
-                assert!(!missing.is_empty(), "should report missing source");
-            }
-            Err(_) => {} // acceptable
+        if let Ok(report) = result {
+            let missing = report.get("missing").and_then(|v| v.as_array()).unwrap();
+            assert!(!missing.is_empty(), "should report missing source");
         }
         let _ = std::fs::remove_dir_all(&base);
     }
