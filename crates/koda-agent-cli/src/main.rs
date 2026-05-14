@@ -4022,7 +4022,7 @@ fn compute_resource_file_hashes(resources_dir: &Path) -> serde_json::Value {
                 .strip_prefix(resources_dir)
                 .unwrap_or(&path)
                 .to_string_lossy()
-                .to_string();
+                .replace('\\', "/");
             if path.is_dir() {
                 // Recurse into subdirectories
                 if let Ok(sub_entries) = fs::read_dir(&path) {
@@ -4058,7 +4058,7 @@ fn collect_file_hash(
             .strip_prefix(base)
             .unwrap_or(&path)
             .to_string_lossy()
-            .to_string();
+            .replace('\\', "/");
         if let Ok(bytes) = fs::read(&path) {
             let hash = format!("{:x}", Sha256::digest(&bytes));
             hashes.insert(relative, serde_json::Value::String(hash));
