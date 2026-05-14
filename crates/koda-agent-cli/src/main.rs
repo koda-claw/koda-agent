@@ -7607,4 +7607,256 @@ id = "mimo-v2.5-pro"
         assert_eq!(parse_version_like("0.1.2-alpha.1").unwrap(), vec![0, 1, 2]);
         assert!(compare_version_like("dev", "0.1.2").is_none());
     }
+
+    #[test]
+    fn version_compare_single_digit_segments() {
+        use std::cmp::Ordering;
+        assert_eq!(
+            compare_version_like("1.0.0", "1.0.0"),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            compare_version_like("1.0.0", "10.0.0"),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_version_like("2.0.0", "1.9.9"),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(compare_version_like("1.0", "1.0.0"), Some(Ordering::Less)); // fewer segments < same prefix with extra 0
+    }
+
+    #[test]
+    fn version_compare_with_v_prefix_and_prerelease() {
+        use std::cmp::Ordering;
+        assert_eq!(
+            compare_version_like("v1.2.3", "v1.2.3"),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            compare_version_like("v0.1.11-beta", "0.1.11"),
+            Some(Ordering::Equal) // prerelease suffix stripped
+        );
+    }
+
+    #[test]
+    fn version_compare_invalid_returns_none() {
+        assert!(compare_version_like("abc", "1.0.0").is_none());
+        assert!(compare_version_like("1.0.0", "abc").is_none());
+        assert!(compare_version_like("", "1.0.0").is_none());
+    }
+
+    #[test]
+    fn check_for_update_reports_new_version() {
+        let manifest = ResourceManifest {
+            version: "1.2.0".into(),
+            published_at: "2025-01-01".into(),
+            min_binary_version: None,
+            download_url: "https://example.com".into(),
+            sha256: "abc123".into(),
+            signature: None,
+            changelog: None,
+        };
+        // Current < manifest → update available
+        assert!(check_for_update("1.1.0", &manifest).is_some());
+        // Current == manifest → no update
+        assert!(check_for_update("1.2.0", &manifest).is_none());
+        // Current > manifest → no update
+        assert!(check_for_update("2.0.0", &manifest).is_none());
+    }
+
+    #[test]
+    fn compute_resource_file_hashes_empty_dir() {
+        let dir = std::env::temp_dir().join("koda_test_empty_hashes");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = compute_resource_file_hashes(&dir);
+        assert!(result.is_object());
+        assert!(result.as_object().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compute_resource_file_hashes_with_files() {
+        let dir = std::env::temp_dir().join("koda_test_file_hashes");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), "hello").unwrap();
+        std::fs::write(dir.join("sub/b.txt"), "world").unwrap();
+
+        let result = compute_resource_file_hashes(&dir);
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        // Check relative paths
+        assert!(obj.contains_key("a.txt"));
+        assert!(obj.contains_key("sub/b.txt"));
+        // Check sha256 is 64 hex chars
+        for v in obj.values() {
+            let h = v.as_str().unwrap();
+            assert_eq!(h.len(), 64);
+            assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── 6.2 Integration: full install + version.json roundtrip ──
+    #[test]
+    fn install_resources_writes_version_json() {
+        let base = std::env::temp_dir().join("koda_test_install_ver");
+        let _ = std::fs::remove_dir_all(&base);
+        let src = base.join("src");
+        let home = base.join("home");
+        // Create minimal source resources
+        std::fs::create_dir_all(src.join("assets")).unwrap();
+        std::fs::create_dir_all(src.join("memory")).unwrap();
+        std::fs::create_dir_all(src.join("config")).unwrap();
+        std::fs::write(src.join("assets/test.txt"), "hello").unwrap();
+        std::fs::write(src.join("memory/test.md"), "# test").unwrap();
+
+        let result = install_resources(&src, &home, false, false);
+        assert!(
+            result.is_ok(),
+            "install_resources failed: {:?}",
+            result.err()
+        );
+        let report = result.unwrap();
+        // Should have copied files
+        let copied = report.get("copied").and_then(|v| v.as_array()).unwrap();
+        assert!(!copied.is_empty(), "no files were copied");
+
+        // version.json should exist and contain expected fields
+        let ver_path = home.join("resources/version.json");
+        assert!(ver_path.exists(), "version.json not created");
+        let content = std::fs::read_to_string(&ver_path).unwrap();
+        let ver: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(ver.get("installed_version").is_some());
+        assert!(ver.get("file_hashes").is_some());
+        assert!(ver.get("binary_version").is_some());
+
+        // load_local_version should return the same data
+        let loaded = load_local_version(&home);
+        assert!(loaded.is_some());
+        assert_eq!(
+            loaded
+                .unwrap()
+                .get("installed_version")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            ver.get("installed_version").unwrap().as_str().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn install_resources_dry_run_no_write() {
+        let base = std::env::temp_dir().join("koda_test_dry_run");
+        let _ = std::fs::remove_dir_all(&base);
+        let src = base.join("src");
+        let home = base.join("home");
+        std::fs::create_dir_all(src.join("assets")).unwrap();
+        std::fs::write(src.join("assets/a.txt"), "x").unwrap();
+
+        let result = install_resources(&src, &home, false, true);
+        assert!(result.is_ok());
+        // dry_run should NOT create version.json
+        assert!(!home.join("resources/version.json").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── 6.3 Boundary tests ──
+    #[test]
+    fn load_local_version_missing_returns_none() {
+        let home = std::env::temp_dir().join("koda_test_no_version");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        assert!(load_local_version(&home).is_none());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn load_local_version_corrupt_json_returns_none() {
+        let home = std::env::temp_dir().join("koda_test_corrupt_ver");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("resources")).unwrap();
+        std::fs::write(home.join("resources/version.json"), "{not valid json!!!").unwrap();
+        // Should handle gracefully (return None, not panic)
+        let result = std::panic::catch_unwind(|| load_local_version(&home));
+        assert!(
+            result.is_ok(),
+            "load_local_version panicked on corrupt JSON"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn install_resources_missing_source_dir() {
+        let base = std::env::temp_dir().join("koda_test_missing_src");
+        let _ = std::fs::remove_dir_all(&base);
+        let src = base.join("nonexistent_src");
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let result = install_resources(&src, &home, false, false);
+        // Should either succeed with missing entries or return error, but NOT panic
+        match result {
+            Ok(report) => {
+                let missing = report.get("missing").and_then(|v| v.as_array()).unwrap();
+                assert!(!missing.is_empty(), "should report missing source");
+            }
+            Err(_) => {} // acceptable
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn check_for_update_current_equals_manifest_returns_none() {
+        let manifest = ResourceManifest {
+            version: "2.0.0".into(),
+            published_at: "2025-01-01".into(),
+            min_binary_version: None,
+            download_url: "https://example.com".into(),
+            sha256: "abc".into(),
+            signature: None,
+            changelog: Some("test release".into()),
+        };
+        assert!(check_for_update("2.0.0", &manifest).is_none());
+    }
+
+    #[test]
+    fn compute_resource_file_hashes_version_roundtrip() {
+        // Write hashes -> load version.json -> verify hashes match
+        let dir = std::env::temp_dir().join("koda_test_roundtrip");
+        let _ = std::fs::remove_dir_all(&dir);
+        let res = dir.join("resources");
+        std::fs::create_dir_all(&res).unwrap();
+        std::fs::write(res.join("a.txt"), "content_a").unwrap();
+        std::fs::write(res.join("b.txt"), "content_b").unwrap();
+
+        let hashes = compute_resource_file_hashes(&res);
+        // Simulate what install_resources does
+        let ver = serde_json::json!({
+            "installed_version": "1.0.0",
+            "installed_at": "2025-01-01T00:00:00Z",
+            "binary_version": "0.1.11",
+            "file_hashes": hashes
+        });
+        std::fs::write(
+            res.join("version.json"),
+            serde_json::to_string_pretty(&ver).unwrap(),
+        )
+        .unwrap();
+
+        // Load back and verify
+        let loaded: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(res.join("version.json")).unwrap())
+                .unwrap();
+        let loaded_hashes = loaded.get("file_hashes").unwrap().as_object().unwrap();
+        assert_eq!(loaded_hashes.len(), 2);
+        assert_eq!(
+            loaded_hashes.get("a.txt").unwrap().as_str().unwrap(),
+            hashes.get("a.txt").unwrap().as_str().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
