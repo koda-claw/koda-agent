@@ -394,10 +394,10 @@ fn messages_to_timeline(messages: &[ChatMessage]) -> Vec<TimelineItem> {
             "system" => {} // 跳过system消息
             "user" => {
                 // 过滤含tool_results的消息（工具结果回显，非用户输入）
-                if let Some(obj) = msg.content.as_object() {
-                    if obj.contains_key("tool_results") {
-                        continue;
-                    }
+                if let Some(obj) = msg.content.as_object()
+                    && obj.contains_key("tool_results")
+                {
+                    continue;
                 }
                 if let Some(text) = extract_user_text(&msg.content) {
                     if is_system_injected(&text) {
