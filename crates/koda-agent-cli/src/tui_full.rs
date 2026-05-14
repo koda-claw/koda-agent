@@ -540,7 +540,10 @@ fn apply_agent_event(session: &mut TuiSessionState, event: &AgentEvent, tick: u6
             session.active_turn = None;
             session.push_timeline(TimelineItem::System(format!(
                 "turn finished: {stop_reason} ({:.1}s)",
-                session.last_turn_elapsed.map(|d| d.as_secs_f64()).unwrap_or(0.0)
+                session
+                    .last_turn_elapsed
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0)
             )));
         }
         AgentEvent::Stopped => {

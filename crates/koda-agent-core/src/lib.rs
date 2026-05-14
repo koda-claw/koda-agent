@@ -1697,9 +1697,9 @@ pub fn redact_secret(s: &str) -> String {
 
 fn has_api_version(url: &str) -> bool {
     // Check if the last path segment is a version like /v1, /v2, /v4, etc.
-    url.rsplit('/')
-        .next()
-        .is_some_and(|seg| seg.starts_with('v') && seg.len() > 1 && seg[1..].bytes().all(|b| b.is_ascii_digit()))
+    url.rsplit('/').next().is_some_and(|seg| {
+        seg.starts_with('v') && seg.len() > 1 && seg[1..].bytes().all(|b| b.is_ascii_digit())
+    })
 }
 
 pub fn auto_make_url(base: &str, path: &str) -> String {
@@ -1708,7 +1708,9 @@ pub fn auto_make_url(base: &str, path: &str) -> String {
         base.to_string()
     } else if base.ends_with("/v1") {
         format!("{base}/{path}")
-    } else if (path == "chat/completions" || path == "messages" || path == "responses") && !has_api_version(base) {
+    } else if (path == "chat/completions" || path == "messages" || path == "responses")
+        && !has_api_version(base)
+    {
         format!("{base}/v1/{path}")
     } else {
         format!("{base}/{path}")

@@ -2419,7 +2419,10 @@ pub fn parse_claude_sse_lines(lines: &[&str]) -> Result<AgentResponse> {
                             content.push_str(text);
                         }
                         if !other.is_empty() {
-                            eprintln!("[warn] Unknown Claude delta type: {other}, raw: {}", serde_json::to_string(&delta).unwrap_or_default());
+                            eprintln!(
+                                "[warn] Unknown Claude delta type: {other}, raw: {}",
+                                serde_json::to_string(&delta).unwrap_or_default()
+                            );
                         }
                     }
                 }
@@ -3214,11 +3217,20 @@ mod tests {
         let cfg = make_test_cfg(&base_url, &api_key, &model, false);
         let llm = MultiLlmClient::new(cfg);
         let messages = vec![ChatMessage::text("user", "Reply with exactly: HELLO_TEST")];
-        let resp = llm.chat(&messages, &json!([])).await.expect("GLM native_claude chat failed");
+        let resp = llm
+            .chat(&messages, &json!([]))
+            .await
+            .expect("GLM native_claude chat failed");
 
-        assert!(!resp.content.is_empty(), "GLM returned empty content via native_claude");
+        assert!(
+            !resp.content.is_empty(),
+            "GLM returned empty content via native_claude"
+        );
         println!("GLM native_claude response: {}", resp.content);
-        println!("GLM raw response keys: {:?}", resp.raw.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+        println!(
+            "GLM raw response keys: {:?}",
+            resp.raw.as_object().map(|o| o.keys().collect::<Vec<_>>())
+        );
     }
 
     /// Integration test: call GLM via native_claude with SSE streaming.
@@ -3246,9 +3258,15 @@ mod tests {
         let cfg = make_test_cfg(&base_url, &api_key, &model, true);
         let llm = MultiLlmClient::new(cfg);
         let messages = vec![ChatMessage::text("user", "Reply with exactly: STREAM_TEST")];
-        let resp = llm.chat(&messages, &json!([])).await.expect("GLM native_claude stream failed");
+        let resp = llm
+            .chat(&messages, &json!([]))
+            .await
+            .expect("GLM native_claude stream failed");
 
-        assert!(!resp.content.is_empty(), "GLM returned empty content via native_claude stream");
+        assert!(
+            !resp.content.is_empty(),
+            "GLM returned empty content via native_claude stream"
+        );
         println!("GLM native_claude stream response: {}", resp.content);
     }
 

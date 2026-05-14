@@ -1,0 +1,102 @@
+[
+  {
+    "author": {
+      "id": "U_kgDOD89IWQ",
+      "is_bot": false,
+      "login": "vanzheng1994",
+      "name": ""
+    },
+    "body": "## Feature Request: Display session timer and per-message elapsed time in TUI\n\n## Description\n\nShow timing information in the TUI to help users monitor session duration and per-message response time.\n\n### Session Timer\n\nShow total elapsed time since TUI started, placed in a corner of the status bar:\n\n```\n┌─────────────────────────────────────────────────┐\n│ Turn 12/200 │ mimo:pro │ thinking...  │ 03:42  │\n└─────────────────────────────────────────────────┘\n                                       ^^^^^^ session timer\n```\n\nFormat: `MM:SS` when under 1 hour, `HH:MM:SS` after.\n\n### Per-Message Elapsed Time\n\nWhen the agent finishes processing a user message and displays its response, show how long the entire round took (from user sending the message to agent finishing its response, including all intermediate tool calls and LLM turns):\n\n```\n> user: 帮我重构这个模块\n> agent: 好的，我来看一下... (8.3s)\n```\n\nThis is the **wall-clock time for the full user message round-trip**, not a single LLM API call. It covers all turns the agent internally makes to process that one user message.\n\n### Use Cases\n\n1. **Session timer**: Quickly know how long the current session has been running, useful for long tasks\n2. **Per-message timing**: \n   -感知模型响应速度，发现变慢或被限速\n   - 对比不同模型/任务的处理效率\n   - 心理预期管理，知道大概要等多久\n\n## Environment\n\n- OS: Windows 10 x64\n- koda-agent: latest\n",
+    "comments": [],
+    "createdAt": "2026-05-13T10:09:26Z",
+    "labels": [],
+    "number": 7,
+    "title": "Feature Request: Display session timer and per-message elapsed time in TUI"
+  },
+  {
+    "author": {
+      "id": "U_kgDOD89IWQ",
+      "is_bot": false,
+      "login": "vanzheng1994",
+      "name": ""
+    },
+    "body": "## Feature Request: Display max_turns in TUI status bar\n\n## Description\n\nCurrently the TUI mode doesn't show the configured `max_turns` limit anywhere. Users have no way to know how many turns are remaining before the agent hits the hard stop.\n\n## Suggested Behavior\n\nShow the turn counter in the TUI status bar, for example:\n\n```\nTurn 12/200 | mimo:pro | thinking...\n```\n\nThis would:\n1. Let users see the configured max_turns at a glance\n2. Show progress (current turn / max turns)\n3. Help users decide whether to increase the limit for complex tasks\n\n## Related\n\n- `KODA_MAX_TURNS` env var and `llms.toml` `max_turns` field are already supported by the runtime (see #5)\n- `goal` mode already has `--max-turns` flag with a known default of 50\n- The turn loop is `for turn in 1..=self.cfg.max_turns` in `koda-agent-core`\n\n## Environment\n\n- OS: Windows 10 x64\n- koda-agent: latest\n",
+    "comments": [],
+    "createdAt": "2026-05-13T10:06:04Z",
+    "labels": [],
+    "number": 6,
+    "title": "Feature Request: Display current turn / max_turns in TUI status bar"
+  },
+  {
+    "author": {
+      "id": "U_kgDOD89IWQ",
+      "is_bot": false,
+      "login": "vanzheng1994",
+      "name": ""
+    },
+    "body": "## Feature Request: Add `--max-turns` option to one-shot and TUI modes\n\n## Background\n\n`koda-agent goal` already supports `--max-turns` to control the maximum agent turns:\n\n```bash\nkoda-agent goal \"objective\" --max-turns 200\n```\n\nHowever, the one-shot mode (`--input`) and TUI mode (`tui`) do not expose this option. The turn limit appears to be hardcoded (70 turns based on observed behavior).\n\n## Observed Behavior\n\n```bash\n# goal mode: ✅ supports --max-turns\nkoda-agent goal \"task\" --max-turns 200\n\n# one-shot mode: ❌ no --max-turns, hardcoded to 70\nkoda-agent --profile glm --model default --input \"hello\"\n# Runs until 70 turns, then stops\n\n# TUI mode: ❌ no way to configure max turns\nkoda-agent tui\n```\n\n## Requested Behavior\n\n1. Add `--max-turns <N>` to the global options (one-shot mode) so it works with `--input` and `--llm`\n2. Add a `[defaults]` field `max_turns` in `llms.toml` for persistent configuration\n3. Optionally, add a TUI slash command like `/max-turns 200` for runtime adjustment\n\n## Suggested Config\n\n```toml\n[defaults]\nstream = true\ntimeout_secs = 1200\nmax_tokens = 16384\nmax_turns = 200        # ← new field\nfailover = true\n```\n\n## Environment\n\n- OS: Windows 10 x64\n- koda-agent: latest\n",
+    "comments": [
+      {
+        "id": "IC_kwDOSZ6nAc8AAAABCKBwwg",
+        "author": {
+          "login": "vanzheng1994"
+        },
+        "authorAssociation": "NONE",
+        "body": "## Update: Source Code Analysis\n\nChecked the source code in `crates/koda-agent-core/src/lib.rs`. The runtime already fully supports `max_turns`:\n\n### Current Support\n\n1. **Environment variable**: `KODA_MAX_TURNS` (highest priority)\n2. **TOML config**: `max_turns` or `max_turn` field in profile/defaults\n3. **Hardcoded default**: 70 (`.unwrap_or(70)`)\n4. **Turn loop**: `for turn in 1..=self.cfg.max_turns`\n\n### Bug: `config set` doesn't expose `max_turns`\n\nThe runtime reads `max_turns` from TOML, but the CLI `config set` command rejects it:\n\n```\nkoda-agent config set glm max_turns 200\n# Error: unsupported profile field `max_turns`\n```\n\nThe field is silently ignored by `config set` but would work if manually edited into `llms.toml`.\n\n### Workaround\n\nSetting the env var works immediately:\n\n- Windows (permanent): `[Environment]::SetEnvironmentVariable('KODA_MAX_TURNS', '200', 'User')`\n- Linux/Mac: `export KODA_MAX_TURNS=200`\n\n### Suggested Fix\n\n1. Add `max_turns` to the allowed fields in `config set` for both profiles and defaults\n2. Optionally add `--max-turns` to `--input` one-shot mode (as originally requested)\n3. Update `configuration.zh.md` docs to document this field\n",
+        "createdAt": "2026-05-13T09:57:46Z",
+        "includesCreatedEdit": false,
+        "isMinimized": false,
+        "minimizedReason": "",
+        "reactionGroups": [],
+        "url": "https://github.com/koda-claw/koda-agent/issues/5#issuecomment-4439699650",
+        "viewerDidAuthor": false
+      }
+    ],
+    "createdAt": "2026-05-13T09:49:42Z",
+    "labels": [],
+    "number": 5,
+    "title": "Feature Request: Add --max-turns option to one-shot and TUI modes"
+  },
+  {
+    "author": {
+      "id": "U_kgDOD89IWQ",
+      "is_bot": false,
+      "login": "vanzheng1994",
+      "name": ""
+    },
+    "body": "## Bug Description\n\nWhen using `kind = \"native_claude\"` with a non-Anthropic provider (e.g. ZhipuAI's Anthropic-compatible endpoint), the agent enters an infinite loop of \"No-tool response requires another turn\" until the turn limit is exhausted (70 turns).\n\nThe API connection and authentication succeed — the model does respond — but the agent's `native_claude` response parser fails to recognize the response content, treating every response as needing another turn.\n\n## Reproduction\n\n```bash\n# Add a profile using native_claude kind with a third-party Anthropic-compatible endpoint\nkoda-agent config add glm \\\n  --kind native_claude \\\n  --base-url \"https://open.bigmodel.cn/api/anthropic\" \\\n  --api-key-env ZHIPUAI_API_KEY \\\n  --model \"glm-5.1\"\n\n# Set a valid API key\nkoda-agent config secret ZHIPUAI_API_KEY\n\n# Temporarily disable other profiles to pass global validation\n# Then run:\nkoda-agent --profile glm --model default --input \"hello, introduce yourself in one sentence\"\n```\n\n## Observed Behavior\n\n```\n**LLM Running (Turn 1) ...**\n[Info] No-tool response requires another turn.\n**LLM Running (Turn 2) ...**\n[Info] No-tool response requires another turn.\n... (repeats 70 times until turn limit)\n```\n\nKey observations:\n- **No network errors**: The API connection succeeds, no 401/404/timeout\n- **Model responds**: The LLM call completes each turn without error\n- **Parser fails**: The agent treats every response as empty/invalid and requests another turn\n- **No output**: The model's actual response content is never displayed or returned\n\n## Possible Causes\n\n1. **Response format mismatch**: ZhipuAI's Anthropic-compatible endpoint may return slightly different `content_block` structure, `stop_reason` value, or missing fields compared to native Anthropic API\n2. **stop_reason differences**: Anthropic uses `end_turn` / `tool_use` / `max_tokens`, but ZhipuAI might return different values (e.g. `stop` instead of `end_turn`)\n3. **Content block structure**: The response might use a different content block type or wrapper format that the parser doesn't handle\n\n## Suggested Fixes\n\n1. **Add verbose/debug logging**: When `--verbose` is enabled, log the raw LLM response so users can inspect the actual format and identify the mismatch\n2. **Tolerant parsing**: Make the `native_claude` parser more tolerant of response format variations from compatible providers\n3. **Document supported providers**: Clearly state which providers are tested with `native_claude` kind, and note that third-party Anthropic-compatible endpoints may not work\n\n## Environment\n\n- OS: Windows 10 x64\n- koda-agent: latest\n- Profile: glm (native_claude kind)\n- Endpoint: ZhipuAI Anthropic-compatible (`https://open.bigmodel.cn/api/anthropic`)\n- Model: glm-5.1\n",
+    "comments": [],
+    "createdAt": "2026-05-13T09:42:15Z",
+    "labels": [],
+    "number": 4,
+    "title": "native_claude kind causes infinite loop with third-party Anthropic-compatible providers"
+  },
+  {
+    "author": {
+      "id": "U_kgDOD89IWQ",
+      "is_bot": false,
+      "login": "vanzheng1994",
+      "name": ""
+    },
+    "body": "## Bug Description\n\n当存在多个 profile 时，只要其中一个 profile 的 API key 缺失，`config validate` 就会失败，导致**所有** profile（包括 key 完整的）都无法使用。\n\n## Reproduction\n\n```bash\n# 配置两个 profile，其中一个缺 key\nkoda-agent config setup glm\nkoda-agent config setup claude\nkoda-agent config secret ZHIPUAI_API_KEY\n# 不配置 ANTHROPIC_API_KEY\n\nkoda-agent --profile glm --model default --input \"hello\"\n```\n\n## Observed Behavior\n\n```\nError: profile `claude:default` missing API key; run `koda-agent config secret ANTHROPIC_API_KEY`\n```\n\n即使指定了 `--profile glm`（key 完整），程序仍然因为 claude 缺 key 而拒绝启动。\n\n## Expected Behavior\n\n当使用 `--profile` 指定了具体 profile 时，只校验该 profile 的 key 即可。全局校验应作为 `config validate` 的功能，不应阻断指定 profile 的启动。\n\n或者至少提供 `--no-validate` 参数允许跳过校验。\n\n## Environment\n\n- OS: Windows 10 x64\n- koda-agent: latest\n- Profiles: glm (key ok) + claude (key missing)\n",
+    "comments": [],
+    "createdAt": "2026-05-13T09:35:12Z",
+    "labels": [],
+    "number": 3,
+    "title": "config validate blocks entire startup when any profile API key is missing"
+  },
+  {
+    "author": {
+      "id": "U_kgDOD89IWQ",
+      "is_bot": false,
+      "login": "vanzheng1994",
+      "name": ""
+    },
+    "body": "## Bug Description\n\n`native_oai` 模式在 base_url 后硬编码拼接 `/v1/chat/completions`，导致部分提供商无法使用。\n\nZhipuAI (智谱) 的 OpenAI 兼容端点完整路径是：\n```\nhttps://open.bigmodel.cn/api/paas/v4/chat/completions\n```\n\n但无论如何设置 `base_url`，都无法命中正确路径。\n\n## Reproduction\n\n```bash\nkoda-agent config setup glm\nkoda-agent config secret ZHIPUAI_API_KEY\n# 输入有效 key\n\nkoda-agent --profile glm --model default --input \"hello\"\n```\n\n## Observed Behavior\n\n| base_url | 实际请求路径 | 结果 |\n|---|---|---|\n| `https://open.bigmodel.cn/api/paas/v4` | `/v4/v1/chat/completions` | 404 |\n| `https://open.bigmodel.cn/api/paas` | `/paas/v1/chat/completions` | 404 |\n\n正确路径应为 `/v4/chat/completions`。\n\n## Expected Behavior\n\n提供一种方式让用户控制 API 路径前缀，例如：\n1. 当 base_url 已包含路径时（如 `/v4`），不再追加 `/v1`\n2. 新增 `api_path_prefix` 配置项\n3. 或允许 base_url 作为完整前缀（到 `/chat/completions` 之前的部分）\n\n## Environment\n\n- OS: Windows 10 x64\n- koda-agent: latest\n- Profile: glm preset (native_oai kind)\n",
+    "comments": [],
+    "createdAt": "2026-05-13T09:35:10Z",
+    "labels": [],
+    "number": 2,
+    "title": "native_oai mode hardcodes /v1 prefix - incompatible with ZhipuAI /v4 endpoint"
+  }
+]

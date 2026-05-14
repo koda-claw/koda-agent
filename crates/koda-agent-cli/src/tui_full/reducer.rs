@@ -523,9 +523,9 @@ fn branch_active_session(
             stream_state: StreamState::Idle,
             thinking_state: old.thinking_state.clone(),
             stream_metrics: StreamMetrics::default(),
-                session_started_at: None,
-                turn_started_at: None,
-                last_turn_elapsed: None,
+            session_started_at: None,
+            turn_started_at: None,
+            last_turn_elapsed: None,
         },
     );
     let runtime = runtimes

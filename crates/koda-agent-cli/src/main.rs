@@ -683,10 +683,16 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&hits)?);
             return Ok(());
         }
-        Some(CliCommand::Tui { full, line, max_turns }) => {
+        Some(CliCommand::Tui {
+            full,
+            line,
+            max_turns,
+        }) => {
             if max_turns.is_some() {
                 // SAFETY: single-threaded startup, no concurrent env reads yet
-                unsafe { std::env::set_var("KODA_MAX_TURNS", max_turns.unwrap().to_string()); }
+                unsafe {
+                    std::env::set_var("KODA_MAX_TURNS", max_turns.unwrap().to_string());
+                }
             }
             if full || (!line && env_flag_enabled("KODA_TUI_FULL")) {
                 return tui_full::run_tui_full(cfg).await;
@@ -737,7 +743,9 @@ async fn main() -> Result<()> {
     } else {
         if let Some(mt) = args.max_turns {
             // SAFETY: single-threaded startup, no concurrent env reads yet
-            unsafe { std::env::set_var("KODA_MAX_TURNS", mt.to_string()); }
+            unsafe {
+                std::env::set_var("KODA_MAX_TURNS", mt.to_string());
+            }
         }
         let input = args
             .input

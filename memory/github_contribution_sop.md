@@ -115,3 +115,8 @@ code_run('bash', 'gh pr status')
 code_run('bash', 'gh pr checks PR_NUMBER')
 code_run('bash', 'gh pr view PR_NUMBER --comments')
 ```
+
+## Rust 大项目测试策略
+- `cargo test --workspace` 在大项目中超时（>180s）很常见
+- **正确做法**: 先 `cargo check --workspace`（~9s）验证编译，再 `cargo test -p <crate>` 逐 crate 测
+- Rust `{}` 占位符: Python f-string/format() 会把 Rust `{}` 误解析为格式占位符 → 用 code_run+literal str.replace 代替
