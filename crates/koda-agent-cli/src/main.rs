@@ -4143,6 +4143,7 @@ fn install_resources(
     // Write version.json for resource version tracking
     let version_json_path = dest_root.join("version.json");
     if !dry_run {
+        fs::create_dir_all(&dest_root)?;
         let file_hashes = compute_resource_file_hashes(&dest_root);
         let version_data = serde_json::json!({
             "installed_version": "1.0.0",
