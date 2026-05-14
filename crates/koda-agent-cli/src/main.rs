@@ -688,10 +688,10 @@ async fn main() -> Result<()> {
             line,
             max_turns,
         }) => {
-            if max_turns.is_some() {
+            if let Some(limit) = max_turns {
                 // SAFETY: single-threaded startup, no concurrent env reads yet
                 unsafe {
-                    std::env::set_var("KODA_MAX_TURNS", max_turns.unwrap().to_string());
+                    std::env::set_var("KODA_MAX_TURNS", limit.to_string());
                 }
             }
             if full || (!line && env_flag_enabled("KODA_TUI_FULL")) {
@@ -5726,11 +5726,11 @@ async fn run_task_mode(
     let mut turn_count: u64 = 0;
     loop {
         turn_count += 1;
-        if let Some(limit) = max_turns {
-            if turn_count > limit {
-                eprintln!("[max-turns] reached turn limit ({limit}), stopping");
-                break;
-            }
+        if let Some(limit) = max_turns
+            && turn_count > limit
+        {
+            eprintln!("[max-turns] reached turn limit ({limit}), stopping");
+            break;
         }
         if dir.join("_stop").exists() {
             runtime.abort();

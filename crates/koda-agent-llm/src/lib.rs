@@ -2321,10 +2321,10 @@ pub fn parse_claude_messages_json(body: &Value) -> Result<AgentResponse> {
             other => {
                 // Fallback: third-party Anthropic-compatible providers may use non-standard
                 // block types (e.g. "output_text" instead of "text"). Extract any text field.
-                if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    if !text.is_empty() {
-                        content.push_str(text);
-                    }
+                if let Some(text) = block.get("text").and_then(Value::as_str)
+                    && !text.is_empty()
+                {
+                    content.push_str(text);
                 }
                 if !other.is_empty() {
                     eprintln!(
