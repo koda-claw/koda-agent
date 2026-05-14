@@ -45,11 +45,11 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
     // Ctrl+C double-press quit (2 second window)
     if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
         let now = Instant::now();
-        if let Some(first) = state.ctrl_c_pending {
-            if now.duration_since(first) < Duration::from_secs(2) {
-                state.ctrl_c_pending = None;
-                return KeyAction::Quit;
-            }
+        if let Some(first) = state.ctrl_c_pending
+            && now.duration_since(first) < Duration::from_secs(2)
+        {
+            state.ctrl_c_pending = None;
+            return KeyAction::Quit;
         }
         state.ctrl_c_pending = Some(now);
         state.status = "press Ctrl+C again within 2s to quit".into();

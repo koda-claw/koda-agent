@@ -14,16 +14,16 @@ const MAX_HISTORY_LINES: usize = 60;
 
 fn get_max_history_sessions() -> usize {
     // 优先从环境变量读取，其次从命令行参数读取，最后使用默认值
-    if let Ok(val) = std::env::var("KODA_MAX_HISTORY_SESSIONS") {
-        if let Ok(n) = val.parse() {
-            return n;
-        }
+    if let Ok(val) = std::env::var("KODA_MAX_HISTORY_SESSIONS")
+        && let Ok(n) = val.parse()
+    {
+        return n;
     }
     // 命令行参数通过环境变量KODA_CLI_MAX_SESSIONS传递
-    if let Ok(val) = std::env::var("KODA_CLI_MAX_SESSIONS") {
-        if let Ok(n) = val.parse() {
-            return n;
-        }
+    if let Ok(val) = std::env::var("KODA_CLI_MAX_SESSIONS")
+        && let Ok(n) = val.parse()
+    {
+        return n;
     }
     DEFAULT_MAX_HISTORY_SESSIONS
 }
@@ -70,7 +70,7 @@ pub(super) fn load_recent_history_sessions(
         .filter(|raw| {
             let session = raw.session.clone().unwrap_or_default();
             // 提取PID（最后一段数字），如 session_20260514_174506_62448 -> 62448
-            let pid = session.split('_').last().unwrap_or(&session).to_string();
+            let pid = session.split('_').next_back().unwrap_or(&session).to_string();
             seen.insert(pid) // 按PID去重，首次出现保留
         })
         .take(get_max_history_sessions())
