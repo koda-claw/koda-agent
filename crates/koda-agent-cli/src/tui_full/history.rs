@@ -171,10 +171,10 @@ fn history_prompt_title(history: &[String], created_at: Option<&str>) -> Option<
             let now = chrono::Local::now();
             let local_dt = dt.with_timezone(&chrono::Local);
             let duration = now.signed_duration_since(local_dt);
-            
+
             // 提取 HH:MM
             let time_str = local_dt.format("%H:%M").to_string();
-            
+
             // 生成相对时间文本
             let relative = if duration.num_days() == 0 {
                 format!("今天 {time_str}")
@@ -193,7 +193,7 @@ fn history_prompt_title(history: &[String], created_at: Option<&str>) -> Option<
             Some(relative)
         })
         .unwrap_or_else(|| "未知时间".to_string());
-    
+
     history.iter().find_map(|line| {
         let prompt = line.trim().strip_prefix("[USER]:")?.trim();
         if prompt.is_empty() {
