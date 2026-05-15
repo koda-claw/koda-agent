@@ -820,7 +820,11 @@ impl AgentConfig {
             llm_api_style: primary.api_style.clone(),
             auth_scheme: primary.auth_scheme.clone(),
             auth_header: primary.auth_header.clone(),
-            max_turns: defaults.and_then(|d| d.max_turns).unwrap_or(70),
+            max_turns: env::var("KODA_MAX_TURNS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .or_else(|| defaults.and_then(|d| d.max_turns))
+                .unwrap_or(70),
             verbose: true,
             stream: primary.stream,
             timeout_secs: primary.timeout_secs,
