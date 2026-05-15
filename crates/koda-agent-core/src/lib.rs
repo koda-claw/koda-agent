@@ -2557,6 +2557,7 @@ pub trait LlmClient: Send + Sync {
         messages: &[ChatMessage],
         tools_schema: &Value,
         _emit: &(dyn Fn(LlmStreamEvent) + Send + Sync),
+        _stop: Option<&AtomicBool>,
     ) -> Result<AgentResponse> {
         self.chat(messages, tools_schema).await
     }
@@ -3123,23 +3124,28 @@ impl AgentRuntime {
             let stream_thinking_flag = Arc::clone(&saw_thinking_delta);
             let response = self
                 .llm
-                .chat_with_events(&snapshot, &tools_schema, &|event| match event {
-                    LlmStreamEvent::ContentDelta { content } => {
-                        if !content.is_empty() {
-                            stream_content_flag.store(true, Ordering::SeqCst);
-                            emit(AgentEvent::AssistantMessageDelta { turn, content });
+                .chat_with_events(
+                    &snapshot,
+                    &tools_schema,
+                    &|event| match event {
+                        LlmStreamEvent::ContentDelta { content } => {
+                            if !content.is_empty() {
+                                stream_content_flag.store(true, Ordering::SeqCst);
+                                emit(AgentEvent::AssistantMessageDelta { turn, content });
+                            }
                         }
-                    }
-                    LlmStreamEvent::ThinkingDelta { content } => {
-                        if !content.is_empty() {
-                            stream_thinking_flag.store(true, Ordering::SeqCst);
-                            emit(AgentEvent::ThinkingMessageDelta { turn, content });
+                        LlmStreamEvent::ThinkingDelta { content } => {
+                            if !content.is_empty() {
+                                stream_thinking_flag.store(true, Ordering::SeqCst);
+                                emit(AgentEvent::ThinkingMessageDelta { turn, content });
+                            }
                         }
-                    }
-                    LlmStreamEvent::Usage { usage } => {
-                        emit(AgentEvent::LlmUsage { turn, usage });
-                    }
-                })
+                        LlmStreamEvent::Usage { usage } => {
+                            emit(AgentEvent::LlmUsage { turn, usage });
+                        }
+                    },
+                    Some(&self.stop),
+                )
                 .await?;
             append_model_log(&self.cfg, "Response", &serde_json::to_string(&response)?)?;
             emit_response_annotations(
@@ -3220,6 +3226,16 @@ impl AgentRuntime {
             let mut next_prompts = Vec::new();
             let mut tool_results = Vec::new();
             for (idx, tc) in response.tool_calls.iter().enumerate() {
+                if self.stop.load(Ordering::SeqCst) {
+                    for skipped in response.tool_calls.iter().skip(idx) {
+                        tool_results.push(ToolResult {
+                            tool_call_id: skipped.id.clone(),
+                            name: skipped.name.clone(),
+                            content: json!({"status":"skipped","msg":"stop requested"}),
+                        });
+                    }
+                    break;
+                }
                 out.push_str(&format!("🛠️ Tool: `{}` args: {}\n", tc.name, tc.args));
                 if langfuse_trace_enabled(&self.cfg) {
                     append_langfuse_trace(

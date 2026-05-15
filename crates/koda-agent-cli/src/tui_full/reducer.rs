@@ -147,7 +147,15 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
                 .active_session()
                 .is_some_and(|s| matches!(s.status, SessionStatus::Running))
             {
-                state.status = format!("session #{} is already running", state.active);
+                if prompt.starts_with('/') {
+                    state.composer = TextArea::default();
+                    return KeyAction::Submit(prompt);
+                } else {
+                    state.status = format!(
+                        "session #{} is already running; use /stop to interrupt",
+                        state.active
+                    );
+                }
             } else {
                 state.composer = TextArea::default();
                 clear_active_pending_ask(state);

@@ -173,6 +173,7 @@ impl LlmClient for MultiLlmClient {
         messages: &[ChatMessage],
         tools_schema: &Value,
         emit: &(dyn Fn(LlmStreamEvent) + Send + Sync),
+        stop: Option<&AtomicBool>,
     ) -> Result<AgentResponse> {
         let len = self.active_order.len();
         if len == 0 {
@@ -195,7 +196,7 @@ impl LlmClient for MultiLlmClient {
                 emit(event);
             };
             match self.clients[idx]
-                .chat_with_events(messages, tools_schema, &emit_with_marker)
+                .chat_with_events(messages, tools_schema, &emit_with_marker, stop)
                 .await
             {
                 Ok(resp) => {
@@ -500,7 +501,7 @@ fn sanitize_leading_user_msg(msg: &mut ChatMessage) {
 #[async_trait]
 impl LlmClient for OpenAiClient {
     async fn chat(&self, messages: &[ChatMessage], tools_schema: &Value) -> Result<AgentResponse> {
-        self.chat_inner(messages, tools_schema, &|_| {}).await
+        self.chat_inner(messages, tools_schema, &|_| {}, None).await
     }
 
     async fn chat_with_events(
@@ -508,8 +509,9 @@ impl LlmClient for OpenAiClient {
         messages: &[ChatMessage],
         tools_schema: &Value,
         emit: &(dyn Fn(LlmStreamEvent) + Send + Sync),
+        _stop: Option<&AtomicBool>,
     ) -> Result<AgentResponse> {
-        self.chat_inner(messages, tools_schema, emit).await
+        self.chat_inner(messages, tools_schema, emit, _stop).await
     }
 
     fn name(&self) -> String {
@@ -535,6 +537,7 @@ impl OpenAiClient {
         messages: &[ChatMessage],
         tools_schema: &Value,
         emit: &(dyn Fn(LlmStreamEvent) + Send + Sync),
+        stop: Option<&AtomicBool>,
     ) -> Result<AgentResponse> {
         let overrides = self
             .session_overrides
@@ -550,23 +553,27 @@ impl OpenAiClient {
                 last_text_tools: Arc::clone(&self.last_text_tools),
                 session_overrides: Arc::default(),
             };
-            return Box::pin(scoped.chat_inner(messages, tools_schema, emit)).await;
+            return Box::pin(scoped.chat_inner(messages, tools_schema, emit, stop)).await;
         }
         let messages = trim_messages_history(messages);
         if self.cfg.llm_api_style.eq_ignore_ascii_case("claude")
             || self.cfg.llm_api_style.eq_ignore_ascii_case("native_claude")
             || self.cfg.llm_api_style.eq_ignore_ascii_case("messages")
         {
-            return self.claude_messages(&messages, tools_schema, emit).await;
+            return self
+                .claude_messages(&messages, tools_schema, emit, stop)
+                .await;
         }
         if self.cfg.llm_api_style.eq_ignore_ascii_case("responses") {
-            return self.responses(&messages, tools_schema, emit).await;
+            return self.responses(&messages, tools_schema, emit, stop).await;
         }
         if self.cfg.llm_api_style.eq_ignore_ascii_case("text")
             || self.cfg.llm_api_style.eq_ignore_ascii_case("tool")
             || self.cfg.llm_api_style.eq_ignore_ascii_case("text_protocol")
         {
-            return self.text_protocol_chat(&messages, tools_schema, emit).await;
+            return self
+                .text_protocol_chat(&messages, tools_schema, emit, stop)
+                .await;
         }
         let url = auto_make_url(&self.cfg.openai_base_url, "chat/completions");
         let mut oai_messages = openai_chat_messages(&messages);
@@ -584,9 +591,13 @@ impl OpenAiClient {
             .context("send OpenAI-compatible request")?;
         let status = res.status();
         if self.cfg.stream {
-            let text = collect_sse_text_with_events(res, |line| {
-                emit_openai_chat_sse_delta(line, emit, &self.cfg.openai_model);
-            })
+            let text = collect_sse_text_with_events(
+                res,
+                |line| {
+                    emit_openai_chat_sse_delta(line, emit, &self.cfg.openai_model);
+                },
+                stop,
+            )
             .await?;
             if !status.is_success() {
                 return Err(anyhow!("LLM error {status}: {text}"));
@@ -846,6 +857,7 @@ impl OpenAiClient {
         messages: &[ChatMessage],
         tools_schema: &Value,
         emit: &(dyn Fn(LlmStreamEvent) + Send + Sync),
+        stop: Option<&AtomicBool>,
     ) -> Result<AgentResponse> {
         let url = auto_make_url(&self.cfg.openai_base_url, "chat/completions");
         let prompt_messages = self.text_protocol_messages(messages, tools_schema);
@@ -861,9 +873,13 @@ impl OpenAiClient {
             .context("send text-protocol OpenAI-compatible request")?;
         let status = res.status();
         let response = if self.cfg.stream {
-            let text = collect_sse_text_with_events(res, |line| {
-                emit_openai_chat_sse_delta(line, emit, &self.cfg.openai_model);
-            })
+            let text = collect_sse_text_with_events(
+                res,
+                |line| {
+                    emit_openai_chat_sse_delta(line, emit, &self.cfg.openai_model);
+                },
+                stop,
+            )
             .await?;
             if !status.is_success() {
                 return Err(anyhow!("LLM error {status}: {text}"));
@@ -916,6 +932,7 @@ impl OpenAiClient {
         messages: &[ChatMessage],
         tools_schema: &Value,
         emit: &(dyn Fn(LlmStreamEvent) + Send + Sync),
+        stop: Option<&AtomicBool>,
     ) -> Result<AgentResponse> {
         let url = auto_make_url(&self.cfg.openai_base_url, "messages");
         let (system, claude_messages) = claude_messages_input(messages, &self.cfg.openai_model);
@@ -940,9 +957,13 @@ impl OpenAiClient {
             .context("send Claude Messages-compatible request")?;
         let status = res.status();
         if self.cfg.stream {
-            let text = collect_sse_text_with_events(res, |line| {
-                emit_claude_sse_delta(line, emit, &self.cfg.openai_model);
-            })
+            let text = collect_sse_text_with_events(
+                res,
+                |line| {
+                    emit_claude_sse_delta(line, emit, &self.cfg.openai_model);
+                },
+                stop,
+            )
             .await?;
             if !status.is_success() {
                 return Err(anyhow!("LLM error {status}: {text}"));
@@ -969,6 +990,7 @@ impl OpenAiClient {
         messages: &[ChatMessage],
         tools_schema: &Value,
         emit: &(dyn Fn(LlmStreamEvent) + Send + Sync),
+        stop: Option<&AtomicBool>,
     ) -> Result<AgentResponse> {
         let url = auto_make_url(&self.cfg.openai_base_url, "responses");
         let mut payload = json!({
@@ -984,9 +1006,13 @@ impl OpenAiClient {
             .context("send OpenAI Responses-compatible request")?;
         let status = res.status();
         if self.cfg.stream {
-            let text = collect_sse_text_with_events(res, |line| {
-                emit_responses_sse_delta(line, emit, &self.cfg.openai_model);
-            })
+            let text = collect_sse_text_with_events(
+                res,
+                |line| {
+                    emit_responses_sse_delta(line, emit, &self.cfg.openai_model);
+                },
+                stop,
+            )
             .await?;
             if !status.is_success() {
                 return Err(anyhow!("LLM error {status}: {text}"));
@@ -1700,11 +1726,15 @@ fn responses_tools(tools_schema: &Value) -> Value {
 async fn collect_sse_text_with_events(
     res: reqwest::Response,
     on_line: impl Fn(&str),
+    stop: Option<&AtomicBool>,
 ) -> Result<String> {
     let mut stream = res.bytes_stream();
     let mut text = String::new();
     let mut pending = String::new();
     while let Some(chunk) = stream.next().await {
+        if stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
+            bail!("stopped");
+        }
         let chunk = String::from_utf8_lossy(&chunk?).to_string();
         text.push_str(&chunk);
         pending.push_str(&chunk);
@@ -2855,9 +2885,11 @@ mod tests {
         let llm = MultiLlmClient::new(cfg);
         let events = Arc::new(Mutex::new(Vec::<&'static str>::new()));
         let events_for_emit = Arc::clone(&events);
-        let resp =
-            llm.chat_with_events(&[ChatMessage::text("user", "hi")], &json!([]), &|event| {
-                match event {
+        let resp = llm
+            .chat_with_events(
+                &[ChatMessage::text("user", "hi")],
+                &json!([]),
+                &|event| match event {
                     LlmStreamEvent::ContentDelta { .. } => {
                         events_for_emit.lock().unwrap().push("content");
                     }
@@ -2867,8 +2899,9 @@ mod tests {
                     LlmStreamEvent::Usage { .. } => {
                         events_for_emit.lock().unwrap().push("usage");
                     }
-                }
-            })
+                },
+                None,
+            )
             .await
             .unwrap();
         server.join().unwrap();

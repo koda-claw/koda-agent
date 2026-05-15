@@ -9,8 +9,8 @@ mod tool_cards;
 use crossterm::{
     cursor::{Hide, Show},
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-        EnableMouseCapture, Event,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -251,7 +251,7 @@ impl TerminalModeGuard {
             EnableBracketedPaste,
             Hide
         )
-            .context("enter alternate screen")?;
+        .context("enter alternate screen")?;
         Ok(Self)
     }
 }
@@ -1033,7 +1033,7 @@ mod tests {
             ),
             KeyAction::None
         );
-        assert_eq!(state.composer, "hi");
+        assert_eq!(state.composer.lines().join("\n"), "hi");
         assert_eq!(
             reduce_key_event(
                 &mut state,
@@ -1463,7 +1463,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let cfg = test_config(d.path());
         let mut state = TuiAppState::from_config(&cfg);
-        state.composer = "second task".into();
+        state.composer = tui_textarea::TextArea::new(vec!["second task".to_string()]);
         state.active_session_mut().unwrap().status = SessionStatus::Running;
         assert_eq!(
             reduce_key_event(
@@ -1473,7 +1473,7 @@ mod tests {
             KeyAction::None
         );
         assert!(state.status.contains("already running"));
-        assert_eq!(state.composer, "second task");
+        assert_eq!(state.composer.lines().join("\n"), "second task");
         assert_eq!(
             reduce_key_event(
                 &mut state,
@@ -1597,7 +1597,7 @@ mod tests {
             created_tick: 0,
         });
         state.active_session_mut().unwrap().status = SessionStatus::WaitingUser;
-        state.composer = "/answer 使用更保守的方案".into();
+        state.composer = tui_textarea::TextArea::new(vec!["/answer 使用更保守的方案".to_string()]);
         assert_eq!(
             reduce_key_event(
                 &mut state,
@@ -1621,7 +1621,7 @@ mod tests {
             created_tick: 0,
         });
         state.active_session_mut().unwrap().status = SessionStatus::WaitingUser;
-        state.composer = "/cancel".into();
+        state.composer = tui_textarea::TextArea::new(vec!["/cancel".to_string()]);
         assert_eq!(
             reduce_key_event(
                 &mut state,
@@ -1656,7 +1656,7 @@ mod tests {
             ),
             KeyAction::None
         );
-        assert_eq!(state.composer, "x");
+        assert_eq!(state.composer.lines().join("\n"), "x");
         assert_eq!(
             reduce_key_event(
                 &mut state,
@@ -1664,7 +1664,7 @@ mod tests {
             ),
             KeyAction::None
         );
-        assert_eq!(state.composer, "xq");
+        assert_eq!(state.composer.lines().join("\n"), "xq");
         assert_eq!(
             reduce_key_event(
                 &mut state,
@@ -1672,7 +1672,7 @@ mod tests {
             ),
             KeyAction::None
         );
-        assert_eq!(state.composer, "x");
+        assert_eq!(state.composer.lines().join("\n"), "x");
     }
 
     #[test]
@@ -1700,7 +1700,7 @@ mod tests {
             state: KeyEventState::NONE,
         };
         assert_eq!(reduce_key_event(&mut state, release_enter), KeyAction::None);
-        assert_eq!(state.composer, "");
+        assert_eq!(state.composer.lines().join("\n"), "");
 
         // A Release of Backspace should not pop an already-empty composer.
         let release_bs = KeyEvent {
@@ -1712,13 +1712,13 @@ mod tests {
         assert_eq!(reduce_key_event(&mut state, release_bs), KeyAction::None);
 
         // Press events should still work.
-        state.composer.clear();
+        state.composer = tui_textarea::TextArea::default();
         let press_h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
         assert_eq!(reduce_key_event(&mut state, press_h), KeyAction::None);
-        assert_eq!(state.composer, "h");
+        assert_eq!(state.composer.lines().join("\n"), "h");
 
         // Release of Ctrl-Q should not quit (only Press quits).
-        state.composer.clear();
+        state.composer = tui_textarea::TextArea::default();
         let release_q = KeyEvent {
             code: KeyCode::Char('q'),
             modifiers: KeyModifiers::NONE,
@@ -2139,7 +2139,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let cfg = test_config(d.path());
         let mut state = TuiAppState::from_config(&cfg);
-        state.composer = "/rename cockpit".into();
+        state.composer = tui_textarea::TextArea::new(vec!["/rename cockpit".to_string()]);
         assert_eq!(
             reduce_key_event(
                 &mut state,
@@ -2186,9 +2186,9 @@ mod tests {
             KeyAction::None
         );
         assert_eq!(state.overlay, Overlay::None);
-        assert_eq!(state.composer, "/rename ");
+        assert_eq!(state.composer.lines().join("\n"), "/rename ");
 
-        state.composer.clear();
+        state.composer = tui_textarea::TextArea::default();
         state.overlay = Overlay::Commands;
         // Ctrl+C twice to quit (2-second window); Ctrl+q is not a quit key
         assert_eq!(
@@ -2233,7 +2233,7 @@ mod tests {
             ),
             KeyAction::None
         );
-        assert_eq!(state.composer, "a\nb");
+        assert_eq!(state.composer.lines().join("\n"), "a\nb");
         assert_eq!(
             reduce_key_event(
                 &mut state,

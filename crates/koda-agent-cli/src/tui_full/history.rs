@@ -580,6 +580,7 @@ fn parse_tool_call_value(value: &serde_json::Value) -> Option<TimelineItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, Local};
     use koda_agent_core::{AgentConfig, MixinConfig};
     use serde_json::json;
     use std::{collections::BTreeMap, fs};
@@ -628,11 +629,15 @@ mod tests {
         let cfg = cfg_with_memory(&dir);
         let l4 = cfg.memory_dir.join("L4_raw_sessions");
         fs::create_dir_all(&l4).unwrap();
+        let four_days_ago = Local::now() - Duration::days(4);
+        let date_str = four_days_ago.format("%Y%m%d").to_string();
+        let session_name = format!("session_{}_120000_1", date_str);
+        let created_at = four_days_ago.format("%Y-%m-%dT12:00:00+08:00").to_string();
         fs::write(
-            l4.join("session_20260510_120000_1.json"),
+            l4.join(format!("{}.json", session_name)),
             serde_json::to_vec_pretty(&json!({
-                "session": "session_20260510_120000_1",
-                "created_at": "2026-05-10T12:00:00+08:00",
+                "session": session_name,
+                "created_at": created_at,
                 "history": ["[USER]: 你好", "[Agent] 调用工具file_read, args: {}", "[Agent] 完成"]
             }))
             .unwrap(),
