@@ -39,6 +39,7 @@ jobs:
       - name: Ensure target is installed
         run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        if: "!startsWith(matrix.os, 'macos')"
       - name: Build
         shell: bash
         run: rustup run stable cargo build -p koda-agent-cli --release --locked --target ${{ matrix.target }}
