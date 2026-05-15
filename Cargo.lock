@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "koda-agent-cli"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1187,7 +1187,7 @@ dependencies = [
 
 [[package]]
 name = "koda-agent-core"
-version = "0.1.9"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1206,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "koda-agent-frontends"
-version = "0.1.9"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "koda-agent-llm"
-version = "0.1.9"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1245,7 +1245,7 @@ dependencies = [
 
 [[package]]
 name = "koda-agent-memory"
-version = "0.1.9"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1266,7 +1266,7 @@ dependencies = [
 
 [[package]]
 name = "koda-agent-tools"
-version = "0.1.9"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3238,7 +3238,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.9"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "futures-util",
