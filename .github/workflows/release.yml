@@ -148,4 +148,4 @@ jobs:
           git add -f resources/resources-manifest.json
           git diff --cached --quiet && exit 0
           git commit -m "Update resources-manifest.json for ${GITHUB_REF_NAME}"
-          git push origin main
+          git push origin HEAD:main
