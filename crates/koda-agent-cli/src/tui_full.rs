@@ -166,11 +166,8 @@ async fn run_event_loop(
                 }
                 // Consume pending_model_switch (set by /model command)
                 if let Some(new_model) = state.pending_model_switch.take() {
-                    let available: Vec<String> = cfg
-                        .llm_configs
-                        .iter()
-                        .map(|m| m.name.clone())
-                        .collect();
+                    let available: Vec<String> =
+                        cfg.llm_configs.iter().map(|m| m.name.clone()).collect();
                     match cfg.llm_configs.iter().find(|m| m.name == new_model) {
                         Some(model_cfg) => {
                             cfg.openai_model = new_model.clone();
@@ -238,30 +235,29 @@ fn handle_terminal_event(
             }
             KeyAction::None => {}
         },
-        Event::Paste(text) => {
-            // Bracketed paste: only when Composer is focused and no overlay
-            if state.focus == FocusPane::Composer && state.overlay == Overlay::None {
-                // Filter control chars except \n \r \t; convert tabs to spaces
-                let cleaned: String = text
-                    .chars()
-                    .map(|ch| match ch {
-                        '\n' | '\r' => ch,
-                        '\t' => ' ',
-                        c if c.is_control() => '\0',
-                        c => c,
-                    })
-                    .filter(|&c| c != '\0')
-                    .collect();
-                // Normalize line endings
-                let cleaned = cleaned.replace("\r\n", "\n").replace('\r', "\n");
-                // Insert line by line into composer
-                for (i, line) in cleaned.split('\n').enumerate() {
-                    if i > 0 {
-                        state.composer.insert_newline();
-                    }
-                    if !line.is_empty() {
-                        state.composer.insert_str(line);
-                    }
+        Event::Paste(text)
+            if state.focus == FocusPane::Composer && state.overlay == Overlay::None =>
+        {
+            // Filter control chars except \n \r \t; convert tabs to spaces
+            let cleaned: String = text
+                .chars()
+                .map(|ch| match ch {
+                    '\n' | '\r' => ch,
+                    '\t' => ' ',
+                    c if c.is_control() => '\0',
+                    c => c,
+                })
+                .filter(|&c| c != '\0')
+                .collect();
+            // Normalize line endings
+            let cleaned = cleaned.replace("\r\n", "\n").replace('\r', "\n");
+            // Insert line by line into composer
+            for (i, line) in cleaned.split('\n').enumerate() {
+                if i > 0 {
+                    state.composer.insert_newline();
+                }
+                if !line.is_empty() {
+                    state.composer.insert_str(line);
                 }
             }
         }

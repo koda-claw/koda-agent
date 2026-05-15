@@ -500,13 +500,14 @@ pub(super) fn apply_local_command(
             Ok(())
         }
         LocalCommand::Config => {
-            let mut lines = Vec::new();
-            lines.push("── Preferences ──".to_string());
-            lines.push("model: ".to_string() + &cfg.openai_model);
-            lines.push("api_style: ".to_string() + &cfg.llm_api_style);
-            lines.push("base_url: ".to_string() + &cfg.openai_base_url);
-            lines.push("workspace: ".to_string() + cfg.workspace_dir.display().to_string().as_str());
-            lines.push("max_turns: ".to_string() + &cfg.max_turns.to_string());
+            let mut lines = vec![
+                "── Preferences ──".to_string(),
+                "model: ".to_string() + &cfg.openai_model,
+                "api_style: ".to_string() + &cfg.llm_api_style,
+                "base_url: ".to_string() + &cfg.openai_base_url,
+                "workspace: ".to_string() + cfg.workspace_dir.display().to_string().as_str(),
+                "max_turns: ".to_string() + &cfg.max_turns.to_string(),
+            ];
             if let Some(ref t) = cfg.temperature {
                 lines.push("temperature: ".to_string() + &t.to_string());
             }
