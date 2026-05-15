@@ -143,7 +143,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add resources/resources-manifest.json
+          git add -f resources/resources-manifest.json
           git diff --cached --quiet && exit 0
           git commit -m "Update resources-manifest.json for ${GITHUB_REF_NAME}"
           git push origin main
