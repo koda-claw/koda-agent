@@ -40,7 +40,8 @@ jobs:
         run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: $HOME/.cargo/bin/cargo build -p koda-agent-cli --release --locked --target ${{ matrix.target }}
+        shell: bash
+        run: rustup run stable cargo build -p koda-agent-cli --release --locked --target ${{ matrix.target }}
       - name: Package Unix
         if: matrix.archive == 'tar.gz'
         shell: bash
