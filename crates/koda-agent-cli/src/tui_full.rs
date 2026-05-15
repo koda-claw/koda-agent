@@ -122,7 +122,7 @@ async fn run_event_loop(
     runtimes: &mut BTreeMap<usize, AgentRuntime>,
     tx: mpsc::UnboundedSender<TuiRuntimeEvent>,
     mut rx: mpsc::UnboundedReceiver<TuiRuntimeEvent>,
-    cfg: AgentConfig,
+    mut cfg: AgentConfig,
 ) -> Result<()> {
     let tick_rate = Duration::from_millis(33);
     let mut last_tick = Instant::now();
@@ -163,6 +163,39 @@ async fn run_event_loop(
                 let event = event::read()?;
                 if handle_terminal_event(state, runtimes, tx.clone(), &cfg, event)? {
                     return Ok(());
+                }
+                // Consume pending_model_switch (set by /model command)
+                if let Some(new_model) = state.pending_model_switch.take() {
+                    let available: Vec<String> = cfg
+                        .llm_configs
+                        .iter()
+                        .map(|m| m.name.clone())
+                        .collect();
+                    match cfg.llm_configs.iter().find(|m| m.name == new_model) {
+                        Some(model_cfg) => {
+                            cfg.openai_model = new_model.clone();
+                            cfg.llm_api_style = model_cfg.api_style.clone();
+                            state.model_label = new_model.clone();
+                            state.api_mode = cfg.llm_api_style.clone();
+                            if let Some(session) = state.active_session_mut() {
+                                let msg = "Model switched to ".to_string()
+                                    + &new_model
+                                    + ". Use /branch to start a session with the new model.";
+                                session.push_timeline(TimelineItem::System(msg));
+                            }
+                            state.status = "model switched to ".to_string() + &new_model;
+                        }
+                        None => {
+                            let hint = "Unknown model: '".to_string()
+                                + &new_model
+                                + "'. Available: "
+                                + &available.join(", ");
+                            state.status = hint.clone();
+                            if let Some(session) = state.active_session_mut() {
+                                session.push_timeline(TimelineItem::System(hint));
+                            }
+                        }
+                    }
                 }
                 dirty = true;
             }

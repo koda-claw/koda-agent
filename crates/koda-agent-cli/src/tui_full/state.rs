@@ -53,6 +53,8 @@ pub(super) struct TuiAppState {
     pub(super) max_turns: Option<u64>,
     /// Ctrl+C double-press quit: records time of first press
     pub(super) ctrl_c_pending: Option<Instant>,
+    /// Pending model switch: set by /model command, consumed in event loop
+    pub(super) pending_model_switch: Option<String>,
 }
 
 impl TuiAppState {
@@ -121,6 +123,7 @@ impl TuiAppState {
             tick: 0,
             max_turns,
             ctrl_c_pending: None,
+            pending_model_switch: None,
         }
     }
 

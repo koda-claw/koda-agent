@@ -33,6 +33,8 @@ pub(super) enum LocalCommand {
     Commands,
     Help,
     CancelAsk,
+    Config,
+    Model(String),
     Rename(String),
     Sessions,
     Switch(String),
@@ -404,6 +406,9 @@ pub(super) fn parse_local_command(input: &str) -> Option<LocalCommand> {
         "/sessions" => Some(LocalCommand::Sessions),
         "/switch" if !arg.is_empty() => Some(LocalCommand::Switch(arg.to_string())),
         "/switch" => Some(LocalCommand::Sessions),
+        "/model" if !arg.is_empty() => Some(LocalCommand::Model(arg.to_string())),
+        "/model" => Some(LocalCommand::Sessions),
+        "/prefs" | "/config" => Some(LocalCommand::Config),
         _ => None,
     }
 }
@@ -488,6 +493,51 @@ pub(super) fn apply_local_command(
         }
         LocalCommand::Switch(target) => {
             switch_session(state, &target);
+            Ok(())
+        }
+        LocalCommand::Model(name) => {
+            state.pending_model_switch = Some(name);
+            Ok(())
+        }
+        LocalCommand::Config => {
+            let mut lines = Vec::new();
+            lines.push("── Preferences ──".to_string());
+            lines.push("model: ".to_string() + &cfg.openai_model);
+            lines.push("api_style: ".to_string() + &cfg.llm_api_style);
+            lines.push("base_url: ".to_string() + &cfg.openai_base_url);
+            lines.push("workspace: ".to_string() + cfg.workspace_dir.display().to_string().as_str());
+            lines.push("max_turns: ".to_string() + &cfg.max_turns.to_string());
+            if let Some(ref t) = cfg.temperature {
+                lines.push("temperature: ".to_string() + &t.to_string());
+            }
+            if let Some(ref mt) = cfg.max_tokens {
+                lines.push("max_tokens: ".to_string() + &mt.to_string());
+            }
+            if let Some(ref re) = cfg.reasoning_effort {
+                lines.push("reasoning_effort: ".to_string() + re);
+            }
+            if let Some(ref tt) = cfg.thinking_type {
+                lines.push("thinking_type: ".to_string() + tt);
+            }
+            if let Some(ref tb) = cfg.thinking_budget_tokens {
+                lines.push("thinking_budget_tokens: ".to_string() + &tb.to_string());
+            }
+            if let Some(ref st) = cfg.service_tier {
+                lines.push("service_tier: ".to_string() + st);
+            }
+            lines.push("stream: ".to_string() + &cfg.stream.to_string());
+            lines.push("verbose: ".to_string() + &cfg.verbose.to_string());
+            lines.push("timeout_secs: ".to_string() + &cfg.timeout_secs.to_string());
+            lines.push("verify_tls: ".to_string() + &cfg.verify_tls.to_string());
+            lines.push("failover: ".to_string() + &cfg.failover.to_string());
+            if let Some(ref px) = cfg.proxy {
+                lines.push("proxy: ".to_string() + px);
+            }
+            let text = lines.join("\n");
+            if let Some(session) = state.active_session_mut() {
+                session.push_timeline(TimelineItem::System(text));
+            }
+            state.status = "showed preferences".into();
             Ok(())
         }
     }
