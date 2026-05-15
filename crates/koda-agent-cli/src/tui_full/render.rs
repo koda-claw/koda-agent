@@ -1,6 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
+    prelude::Widget,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
@@ -8,7 +9,7 @@ use ratatui::{
         ScrollbarState, Wrap,
     },
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 use super::markdown::render_markdown_lines;
 use super::state::{
@@ -817,69 +818,56 @@ fn format_compact_u64(value: u64) -> String {
 }
 
 fn render_composer(frame: &mut Frame<'_>, area: Rect, state: &TuiAppState) {
-    let mut lines = Vec::new();
-    let width = area.width.saturating_sub(4) as usize;
     let pending_ask = state
         .active_session()
         .and_then(|session| session.pending_ask.as_ref());
-    if state.composer.is_empty() {
+
+    let title = if pending_ask.is_some() {
+        "回答 ask_user"
+    } else {
+        "输入 Composer"
+    };
+
+    // Reserve 1 row at bottom for hint bar
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area);
+
+    let block = focused_block(title, state.focus == FocusPane::Composer);
+
+    // TextArea widget handles: cursor rendering, viewport scrolling, line wrapping
+    let mut composer = state.composer.clone();
+    composer.set_block(block);
+    composer.render(chunks[0], frame.buffer_mut());
+
+    // Bottom hint bar
+    let hint = if state.composer.is_empty() {
         if let Some(ask) = pending_ask {
-            let prompt = if ask.candidates.is_empty() {
+            if ask.candidates.is_empty() {
                 "请输入 ask_user 回答后 Enter；/cancel 取消".to_string()
             } else {
                 format!(
                     "按 1-{} 选择候选项，或输入自定义回答后 Enter；/cancel 取消",
                     ask.candidates.len().min(9)
                 )
-            };
-            lines.push(Line::styled(
-                prompt,
-                Style::default().fg(Color::LightYellow),
-            ));
+            }
         } else {
-            lines.push(Line::styled(
-                "Ask Koda Agent... (Enter submit, Ctrl-J newline)",
-                Style::default().fg(Color::DarkGray),
-            ));
+            "← → 移动光标 | Enter submit | Ctrl-J newline | ↑↓ 切换会话 | Ctrl-P commands | ? help"
+                .to_string()
         }
     } else {
-        let composer_lines = state.composer.lines().collect::<Vec<_>>();
-        let start = composer_lines.len().saturating_sub(3);
-        for line in &composer_lines[start..] {
-            lines.push(Line::raw(trim_chars(line, width)));
-        }
-    }
-    lines.push(Line::styled(
-        "Ctrl-P commands | ? help | Ctrl-N new | Ctrl-B branch | Ctrl-W close | Ctrl-L clear",
-        Style::default().fg(Color::DarkGray),
-    ));
+        "← → 移动光标 | Del 删除 | Home/End 行首行尾 | Enter submit | Ctrl-J newline".to_string()
+    };
+    let hint_color = if pending_ask.is_some() {
+        Color::LightYellow
+    } else {
+        Color::DarkGray
+    };
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(focused_block(
-                if pending_ask.is_some() {
-                    "回答 ask_user"
-                } else {
-                    "输入 Composer"
-                },
-                state.focus == FocusPane::Composer,
-            ))
-            .wrap(Wrap { trim: false }),
-        area,
+        Paragraph::new(Line::styled(hint, Style::default().fg(hint_color))),
+        chunks[1],
     );
-
-    // Position the terminal cursor inside the composer text area.
-    if state.focus == FocusPane::Composer {
-        let text_line_count = if state.composer.is_empty() {
-            1usize
-        } else {
-            state.composer.lines().count()
-        };
-        let visible_text_lines = text_line_count.min(3);
-        let line_idx = visible_text_lines.saturating_sub(1) as u16;
-        let last_line = state.composer.lines().last().unwrap_or("");
-        let col = UnicodeWidthStr::width(last_line).min(width) as u16;
-        frame.set_cursor_position((area.x + 1 + col, area.y + 1 + line_idx));
-    }
 }
 
 fn render_overlay(frame: &mut Frame<'_>, state: &TuiAppState) {

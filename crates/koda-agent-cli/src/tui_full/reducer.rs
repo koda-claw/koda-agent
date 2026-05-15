@@ -4,6 +4,7 @@ use koda_agent_core::{AgentConfig, AgentRuntime};
 use ratatui::layout::Rect;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
+use tui_textarea::TextArea;
 
 use super::build_runtime;
 use super::render::{
@@ -67,7 +68,8 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
             }
             (_, KeyCode::Char(ch)) if state.overlay == Overlay::Commands => {
                 if let Some(command) = command_template_for_digit(ch) {
-                    state.composer = command.to_string();
+                    state.composer = TextArea::default();
+                    state.composer.insert_str(command);
                     state.overlay = Overlay::None;
                     state.focus = FocusPane::Composer;
                     state.status = "inserted command template".into();
@@ -108,7 +110,7 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
             return KeyAction::Abort;
         }
         (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
-            state.composer.push('\n');
+            state.composer.insert_newline();
         }
         (KeyModifiers::CONTROL, KeyCode::Char('n')) if state.composer.is_empty() => {
             return KeyAction::NewSession;
@@ -123,7 +125,7 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
             return KeyAction::Local(LocalCommand::Close);
         }
         (_, KeyCode::Enter) => {
-            let prompt = state.composer.trim().to_string();
+            let prompt = state.composer_text().trim().to_string();
             if prompt.is_empty() {
                 if active_pending_ask(state).is_some() {
                     state.status = "请输入回答，或按数字选择候选项".into();
@@ -131,11 +133,11 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
                     state.status = "composer is empty".into();
                 }
             } else if let Some(answer) = parse_pending_ask_prompt(state, &prompt) {
-                state.composer.clear();
+                state.composer = TextArea::default();
                 clear_active_pending_ask(state);
                 return KeyAction::Submit(answer);
             } else if let Some(command) = parse_local_command(&prompt) {
-                state.composer.clear();
+                state.composer = TextArea::default();
                 return KeyAction::Local(command);
             } else if active_pending_ask(state).is_some() && prompt.starts_with('/') {
                 state.status =
@@ -147,13 +149,16 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
             {
                 state.status = format!("session #{} is already running", state.active);
             } else {
-                state.composer.clear();
+                state.composer = TextArea::default();
                 clear_active_pending_ask(state);
                 return KeyAction::Submit(prompt);
             }
         }
         (_, KeyCode::Backspace) => {
-            state.composer.pop();
+            state.composer.delete_char();
+        }
+        (_, KeyCode::Delete) if !state.composer.is_empty() => {
+            state.composer.input(KeyEvent::from(KeyCode::Delete));
         }
         (_, KeyCode::Tab) => {
             state.focus = match state.focus {
@@ -176,6 +181,9 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
         (_, KeyCode::PageUp) => {
             scroll_active_timeline(state, -10);
         }
+        (_, KeyCode::Home) if !state.composer.is_empty() => {
+            state.composer.input(KeyEvent::from(KeyCode::Home));
+        }
         (_, KeyCode::Home) => {
             let active = state.active;
             if let Some(session) = state.active_session_mut() {
@@ -183,6 +191,9 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
                 session.timeline_follow_tail = false;
                 state.status = format!("session #{} timeline top | follow=off", active);
             }
+        }
+        (_, KeyCode::End) if !state.composer.is_empty() => {
+            state.composer.input(KeyEvent::from(KeyCode::End));
         }
         (_, KeyCode::End) => {
             scroll_active_timeline_to_bottom(state);
@@ -198,6 +209,9 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
                 );
             }
         }
+        (_, KeyCode::Down) if !state.composer.is_empty() => {
+            state.composer.input(KeyEvent::from(KeyCode::Down));
+        }
         (_, KeyCode::Down) => {
             if let Some(next) = state
                 .sessions
@@ -208,6 +222,9 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
             {
                 activate_session(state, next);
             }
+        }
+        (_, KeyCode::Up) if !state.composer.is_empty() => {
+            state.composer.input(KeyEvent::from(KeyCode::Up));
         }
         (_, KeyCode::Up) => {
             if let Some(prev) = state
@@ -220,11 +237,17 @@ pub(super) fn reduce_key_event(state: &mut TuiAppState, key: KeyEvent) -> KeyAct
                 activate_session(state, prev);
             }
         }
+        (_, KeyCode::Left) => {
+            state.composer.input(KeyEvent::from(KeyCode::Left));
+        }
+        (_, KeyCode::Right) => {
+            state.composer.input(KeyEvent::from(KeyCode::Right));
+        }
         (_, KeyCode::Char(ch))
             if state.focus == FocusPane::Composer
                 && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
         {
-            state.composer.push(ch);
+            state.composer.input(KeyEvent::from(KeyCode::Char(ch)));
         }
         _ => {}
     }

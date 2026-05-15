@@ -35,3 +35,4 @@ toml.workspace = true
 pulldown-cmark.workspace = true
 unicode-width.workspace = true
 zip.workspace = true
+tui-textarea.workspace = true

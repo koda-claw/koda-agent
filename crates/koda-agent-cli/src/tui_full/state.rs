@@ -6,6 +6,7 @@ use ratatui::{
 };
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
+use tui_textarea::TextArea;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct AppLayout {
@@ -45,7 +46,7 @@ pub(super) struct TuiAppState {
     pub(super) focus: FocusPane,
     pub(super) layout_mode: LayoutMode,
     pub(super) status: String,
-    pub(super) composer: String,
+    pub(super) composer: TextArea<'static>,
     pub(super) overlay: Overlay,
     pub(super) last_layout: Option<AppLayout>,
     pub(super) tick: u64,
@@ -114,7 +115,7 @@ impl TuiAppState {
             focus: FocusPane::Composer,
             layout_mode: LayoutMode::Wide,
             status: "ready | Enter submit | Ctrl-S stop | Ctrl-C×2 quit | Tab focus".into(),
-            composer: String::new(),
+            composer: TextArea::default(),
             overlay: Overlay::None,
             last_layout: None,
             tick: 0,
@@ -166,6 +167,10 @@ impl TuiAppState {
         );
         self.active = id;
         id
+    }
+
+    pub(super) fn composer_text(&self) -> String {
+        self.composer.lines().join("\n")
     }
 }
 

@@ -8,7 +8,10 @@ mod tool_cards;
 
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+        EnableMouseCapture, Event,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -27,10 +30,10 @@ use render::{
     trim_chars,
 };
 #[cfg(test)]
-use state::{FocusPane, LayoutMode, Overlay};
+use state::LayoutMode;
 use state::{
-    PendingAsk, SessionStatus, StreamState, ThinkingState, TimelineItem, ToolDetail, TuiAppState,
-    TuiSessionState,
+    FocusPane, Overlay, PendingAsk, SessionStatus, StreamState, ThinkingState, TimelineItem,
+    ToolDetail, TuiAppState, TuiSessionState,
 };
 use std::{
     collections::BTreeMap,
@@ -202,6 +205,33 @@ fn handle_terminal_event(
             }
             KeyAction::None => {}
         },
+        Event::Paste(text) => {
+            // Bracketed paste: only when Composer is focused and no overlay
+            if state.focus == FocusPane::Composer && state.overlay == Overlay::None {
+                // Filter control chars except \n \r \t; convert tabs to spaces
+                let cleaned: String = text
+                    .chars()
+                    .map(|ch| match ch {
+                        '\n' | '\r' => ch,
+                        '\t' => ' ',
+                        c if c.is_control() => '\0',
+                        c => c,
+                    })
+                    .filter(|&c| c != '\0')
+                    .collect();
+                // Normalize line endings
+                let cleaned = cleaned.replace("\r\n", "\n").replace('\r', "\n");
+                // Insert line by line into composer
+                for (i, line) in cleaned.split('\n').enumerate() {
+                    if i > 0 {
+                        state.composer.insert_newline();
+                    }
+                    if !line.is_empty() {
+                        state.composer.insert_str(line);
+                    }
+                }
+            }
+        }
         Event::Mouse(mouse) => reduce_mouse_event(state, mouse),
         _ => {}
     }
@@ -214,7 +244,13 @@ impl TerminalModeGuard {
     fn enter() -> Result<Self> {
         reset_terminal_mouse_modes();
         enable_raw_mode().context("enable terminal raw mode")?;
-        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, Hide)
+        execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste,
+            Hide
+        )
             .context("enter alternate screen")?;
         Ok(Self)
     }
@@ -227,6 +263,7 @@ impl Drop for TerminalModeGuard {
             io::stdout(),
             Show,
             DisableMouseCapture,
+            DisableBracketedPaste,
             LeaveAlternateScreen
         );
         reset_terminal_mouse_modes();
