@@ -936,7 +936,7 @@ fn help_lines() -> Vec<Line<'static>> {
             "Runtime Slash Commands",
             Style::default().fg(Color::LightBlue),
         ),
-        Line::raw("/status | /llm <n> | /llms | /continue | /btw <question> pass through"),
+        Line::raw("/prefs | /model <name> | /status | /llm <n> | /llms | /continue | /btw <question>"),
     ]
 }
 
@@ -955,6 +955,7 @@ fn command_palette_lines() -> Vec<Line<'static>> {
         Line::raw("7  /status"),
         Line::raw("8  /llms"),
         Line::raw("9  /continue"),
+        Line::raw("   /prefs  |  /model <name>"),
     ]
 }
 
